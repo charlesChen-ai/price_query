@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>股票卡片看板 MVP</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-left"></div>
+    <div class="bg-orb orb-right"></div>
+
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Stock Card Dashboard</p>
+        <h1>卡片式行情管理</h1>
+      </div>
+      <button id="createCardBtn" class="btn btn-primary">新建卡片</button>
+    </header>
+
+    <main>
+      <section class="toolbar">
+        <div class="toolbar-item">
+          <span class="label">卡片总数</span>
+          <strong id="cardCount">0</strong>
+        </div>
+        <div class="toolbar-item">
+          <span class="label">自动刷新中</span>
+          <strong id="autoRefreshCount">0</strong>
+        </div>
+      </section>
+
+      <section id="cardGrid" class="card-grid"></section>
+      <p id="emptyState" class="empty-state">
+        还没有卡片，点击右上角“新建卡片”开始添加股票行情。
+      </p>
+    </main>
+
+    <dialog id="createDialog" class="modal">
+      <form id="createForm" class="modal-content" method="dialog">
+        <div class="modal-head">
+          <h2>新建卡片</h2>
+          <button type="button" id="closeCreateDialog" class="icon-btn">✕</button>
+        </div>
+
+        <label>
+          卡片类型
+          <select id="cardType" required>
+            <option value="stock">股票</option>
+          </select>
+        </label>
+
+        <label>
+          股票代码
+          <input id="symbolInput" type="text" placeholder="如 sh600519 / AAPL / TSLA" required />
+        </label>
+
+        <label>
+          卡片标题（可选）
+          <input id="nameInput" type="text" placeholder="如 贵州茅台" />
+        </label>
+
+        <label>
+          刷新频率
+          <select id="refreshInterval">
+            <option value="5000">5 秒</option>
+            <option value="10000" selected>10 秒</option>
+            <option value="15000">15 秒</option>
+            <option value="30000">30 秒</option>
+            <option value="60000">60 秒</option>
+          </select>
+        </label>
+
+        <label>
+          成本价（可选）
+          <input
+            id="costInput"
+            type="number"
+            inputmode="decimal"
+            step="0.0001"
+            min="0"
+            placeholder="如 53.8000"
+          />
+        </label>
+
+        <fieldset class="permission-set">
+          <legend>自定义权限</legend>
+          <label><input type="checkbox" data-permission="showPrice" checked /> 显示最新价</label>
+          <label><input type="checkbox" data-permission="showChange" checked /> 显示涨跌</label>
+          <label><input type="checkbox" data-permission="showHighLow" checked /> 显示当日高低</label>
+          <label><input type="checkbox" data-permission="showVolume" checked /> 显示成交量</label>
+          <label><input type="checkbox" data-permission="showTimestamp" checked /> 显示更新时间</label>
+          <label><input type="checkbox" data-permission="showPnL" checked /> 显示盈亏比例</label>
+          <label><input type="checkbox" data-permission="showChart" checked /> 显示行情曲线</label>
+          <label><input type="checkbox" data-permission="showVolumeChart" checked /> 显示分时量图</label>
+          <label><input type="checkbox" data-permission="allowManualRefresh" checked /> 允许手动刷新</label>
+          <label><input type="checkbox" data-permission="allowEdit" checked /> 允许编辑权限</label>
+          <label><input type="checkbox" data-permission="allowDelete" checked /> 允许删除卡片</label>
+          <label><input type="checkbox" data-permission="autoRefresh" checked /> 启用自动刷新</label>
+        </fieldset>
+
+        <button type="submit" class="btn btn-primary">创建卡片</button>
+      </form>
+    </dialog>
+
+    <dialog id="permissionDialog" class="modal">
+      <form id="permissionForm" class="modal-content" method="dialog">
+        <div class="modal-head">
+          <h2>卡片权限设置</h2>
+          <button type="button" id="closePermissionDialog" class="icon-btn">✕</button>
+        </div>
+
+        <input type="hidden" id="permissionCardId" />
+
+        <label>
+          刷新频率
+          <select id="permissionRefreshInterval">
+            <option value="5000">5 秒</option>
+            <option value="10000">10 秒</option>
+            <option value="15000">15 秒</option>
+            <option value="30000">30 秒</option>
+            <option value="60000">60 秒</option>
+          </select>
+        </label>
+
+        <label>
+          成本价（可选）
+          <input
+            id="permissionCostInput"
+            type="number"
+            inputmode="decimal"
+            step="0.0001"
+            min="0"
+            placeholder="如 53.8000"
+          />
+        </label>
+
+        <fieldset class="permission-set" id="permissionContainer">
+          <legend>权限开关</legend>
+        </fieldset>
+
+        <button type="submit" class="btn btn-primary">保存设置</button>
+      </form>
+    </dialog>
+
+    <template id="cardTemplate">
+      <article class="stock-card">
+        <header class="card-head">
+          <div>
+            <p class="symbol"></p>
+            <h3 class="name"></h3>
+          </div>
+          <div class="card-actions"></div>
+        </header>
+
+        <section class="metrics"></section>
+        <section class="chart-wrap"></section>
+        <section class="volume-wrap"></section>
+
+        <footer class="status-row">
+          <span class="status-text">等待刷新</span>
+        </footer>
+      </article>
+    </template>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
