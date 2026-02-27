@@ -92,6 +92,8 @@
                 <option value="ma_breakout">MA 突破检测</option>
                 <option value="macd_cross">MACD 金叉/死叉</option>
                 <option value="rsi_zone">RSI 超买超卖</option>
+                <option value="kdj_cross">KDJ 金叉/死叉</option>
+                <option value="kdj_zone">KDJ 超买超卖</option>
               </select>
             </label>
             <div id="alertRuleParams" class="alert-rule-params"></div>
@@ -300,6 +302,10 @@
       </article>
     </template>
 
+    <script src="./core/shared-utils.js"></script>
+    <script src="./core/indicator-utils.js"></script>
+    <script src="./core/state-merge.js"></script>
+    <script src="./core/signal-policy.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

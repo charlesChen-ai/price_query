@@ -12,13 +12,16 @@ const QUOTE_DEFAULT_TOPIC = "mixed";
 const QUOTE_TOPICS = new Set(["mixed", "economics", "philosophy", "engineering"]);
 const DEFAULT_CARD_VISUAL_SIZE = "standard";
 const CARD_VISUAL_SIZES = new Set(["compact", "standard", "expanded"]);
+const coreUtils = window.DashboardCore || {};
+const indicatorUtils = window.DashboardIndicatorCore || {};
+const stateMergeUtils = window.DashboardStateMergeCore || {};
 const LONG_PRESS_MS = 380;
 const LONG_PRESS_MOVE_TOLERANCE = 10;
 const ALERT_HISTORY_LIMIT = 180;
 const ALERT_SCAN_COOLDOWN_MS = 0;
 const ALERT_LOW_POWER_SCAN_COOLDOWN_MS = 30000;
 const ALERT_DEFAULT_COOLDOWN_MS = 5 * 60 * 1000;
-const ALERT_RULE_TYPES = new Set(["price", "change", "ma_breakout", "macd_cross", "rsi_zone"]);
+const ALERT_RULE_TYPES = new Set(["price", "change", "ma_breakout", "macd_cross", "rsi_zone", "kdj_cross", "kdj_zone"]);
 const ALERT_MA_KEYS = new Set(["ma5", "ma10", "ma20"]);
 const ALERT_RULE_TYPE_LABELS = {
   price: "价格阈值",
@@ -26,6 +29,8 @@ const ALERT_RULE_TYPE_LABELS = {
   ma_breakout: "MA 突破",
   macd_cross: "MACD 信号",
   rsi_zone: "RSI 区间",
+  kdj_cross: "KDJ 信号",
+  kdj_zone: "KDJ 区间",
 };
 const ALERT_COOLDOWN_OPTIONS = [
   { value: 60 * 1000, label: "1 分钟" },
@@ -198,6 +203,8 @@ const state = {
   cards: [],
   refreshTimer: null,
   remoteSaveTimer: null,
+  remoteRevision: 0,
+  remoteSaveInFlight: false,
   stockSuggestions: [],
   isReordering: false,
   alertEngine: buildDefaultAlertEngineState(),
@@ -1174,6 +1181,7 @@ async function loadCards() {
   if (isHttpOrigin()) {
     remoteState = await readRemoteState();
   }
+  state.remoteRevision = Number(remoteState?.revision) || 0;
 
   const remoteCards = Array.isArray(remoteState?.cards) ? remoteState.cards : null;
 
@@ -1201,8 +1209,7 @@ async function loadCards() {
       state.alertEngine.history.length > 0 ||
       state.alertEngine.totalTriggered > 0)
   ) {
-    const snapshot = JSON.stringify({ cards: serializeCards(), alerts: serializeAlertEngine() });
-    void persistRemoteState(snapshot);
+    void persistRemoteState({ cards: serializeCards(), alerts: serializeAlertEngine() });
   }
 }
 
@@ -1368,6 +1375,7 @@ async function readRemoteState() {
     return {
       cards: Array.isArray(payload?.cards) ? payload.cards : [],
       alerts: payload?.alerts && typeof payload.alerts === "object" ? payload.alerts : null,
+      revision: Number.isFinite(Number(payload?.revision)) ? Number(payload.revision) : 0,
     };
   } catch {
     return null;
@@ -1378,25 +1386,86 @@ function scheduleRemoteSave(cardsPayload = serializeCards(), alertsPayload = ser
   if (!isHttpOrigin()) return;
   if (state.remoteSaveTimer) clearTimeout(state.remoteSaveTimer);
 
-  const snapshot = JSON.stringify({ cards: cardsPayload, alerts: alertsPayload });
+  const snapshot = { cards: cardsPayload, alerts: alertsPayload };
   state.remoteSaveTimer = setTimeout(() => {
     void persistRemoteState(snapshot);
   }, REMOTE_SAVE_DEBOUNCE_MS);
 }
 
-async function persistRemoteState(snapshot) {
+async function persistRemoteState(snapshot, attempt = 0) {
+  if (!snapshot || typeof snapshot !== "object") return;
+
+  state.remoteSaveInFlight = true;
   try {
-    await fetch(STATE_ENDPOINT, {
+    const response = await fetch(STATE_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: snapshot,
+      body: JSON.stringify({
+        cards: Array.isArray(snapshot.cards) ? snapshot.cards : [],
+        alerts: snapshot.alerts && typeof snapshot.alerts === "object" ? snapshot.alerts : buildDefaultAlertEngineState(),
+        revision: state.remoteRevision || 0,
+      }),
       cache: "no-store",
     });
+
+    if (response.status === 409) {
+      const payload = await response.json().catch(() => null);
+      const remoteState = {
+        cards: Array.isArray(payload?.cards) ? payload.cards : [],
+        alerts: payload?.alerts && typeof payload.alerts === "object" ? payload.alerts : buildDefaultAlertEngineState(),
+        revision: Number.isFinite(Number(payload?.revision)) ? Number(payload.revision) : 0,
+      };
+      state.remoteRevision = remoteState.revision;
+
+      const merged = mergeDashboardStateForConflict(snapshot, remoteState);
+      state.cards = hydrateCards(merged.cards);
+      state.alertEngine = hydrateAlertEngine(merged.alerts, state.cards);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeCards()));
+      localStorage.setItem(ALERT_STORAGE_KEY, JSON.stringify(serializeAlertEngine()));
+      render();
+      renderAlertWorkbench();
+
+      if (attempt < 1) {
+        await persistRemoteState({ cards: merged.cards, alerts: merged.alerts }, attempt + 1);
+      }
+      return;
+    }
+
+    if (!response.ok) return;
+    const payload = await response.json().catch(() => null);
+    if (Number.isFinite(Number(payload?.revision))) {
+      state.remoteRevision = Number(payload.revision);
+    } else {
+      state.remoteRevision += 1;
+    }
   } catch {
     // Keep localStorage as durable fallback.
+  } finally {
+    state.remoteSaveInFlight = false;
   }
+}
+
+function mergeDashboardStateForConflict(localSnapshot, remoteState) {
+  if (typeof stateMergeUtils.mergeDashboardState === "function") {
+    return stateMergeUtils.mergeDashboardState(
+      {
+        cards: Array.isArray(localSnapshot.cards) ? localSnapshot.cards : [],
+        alerts:
+          localSnapshot.alerts && typeof localSnapshot.alerts === "object"
+            ? localSnapshot.alerts
+            : buildDefaultAlertEngineState(),
+      },
+      remoteState,
+      { alertHistoryLimit: ALERT_HISTORY_LIMIT }
+    );
+  }
+
+  return {
+    cards: Array.isArray(remoteState.cards) ? remoteState.cards : [],
+    alerts: remoteState.alerts && typeof remoteState.alerts === "object" ? remoteState.alerts : buildDefaultAlertEngineState(),
+  };
 }
 
 function render() {
@@ -1583,12 +1652,36 @@ function renderAlertRuleParams(type, params, disabled = false) {
     return;
   }
 
-  refs.alertRuleParams.innerHTML = `<label class="alert-inline-field">
+  if (type === "rsi_zone") {
+    refs.alertRuleParams.innerHTML = `<label class="alert-inline-field">
       <span>区间</span>
       <select data-alert-param="zone">
         <option value="both" ${normalized.zone === "both" ? "selected" : ""}>超买或超卖</option>
         <option value="overbought" ${normalized.zone === "overbought" ? "selected" : ""}>超买 (RSI ≥ 70)</option>
         <option value="oversold" ${normalized.zone === "oversold" ? "selected" : ""}>超卖 (RSI ≤ 30)</option>
+      </select>
+    </label>`;
+    return;
+  }
+
+  if (type === "kdj_cross") {
+    refs.alertRuleParams.innerHTML = `<label class="alert-inline-field">
+      <span>信号</span>
+      <select data-alert-param="signal">
+        <option value="both" ${normalized.signal === "both" ? "selected" : ""}>金叉或死叉</option>
+        <option value="golden" ${normalized.signal === "golden" ? "selected" : ""}>金叉</option>
+        <option value="death" ${normalized.signal === "death" ? "selected" : ""}>死叉</option>
+      </select>
+    </label>`;
+    return;
+  }
+
+  refs.alertRuleParams.innerHTML = `<label class="alert-inline-field">
+      <span>区间</span>
+      <select data-alert-param="zone">
+        <option value="both" ${normalized.zone === "both" ? "selected" : ""}>超买或超卖</option>
+        <option value="overbought" ${normalized.zone === "overbought" ? "selected" : ""}>超买 (KDJ J ≥ 100)</option>
+        <option value="oversold" ${normalized.zone === "oversold" ? "selected" : ""}>超卖 (KDJ J ≤ 0)</option>
       </select>
     </label>`;
 }
@@ -1598,7 +1691,7 @@ function renderAlertRuleList() {
   const rules = state.alertEngine.rules || [];
   if (!rules.length) {
     refs.alertRuleList.innerHTML =
-      '<p class="status-text">暂无预警规则。可以先添加价格阈值或 MA/MACD/RSI 规则。</p>';
+      '<p class="status-text">暂无预警规则。可以先添加价格阈值或 MA/MACD/RSI/KDJ 规则。</p>';
     return;
   }
 
@@ -1641,7 +1734,9 @@ function renderAlertHistoryList() {
     .map(
       (item) => `<article class="alert-history-item">
         <div>
-          <p class="alert-history-title">${escapeHtml(item.title || "工作通知")}</p>
+          <p class="alert-history-title">${escapeHtml(item.title || "工作通知")}${
+            item.sourceIndicator ? ` · ${escapeHtml(item.sourceIndicator)}` : ""
+          }</p>
           <p class="alert-history-detail">${escapeHtml(item.detail || "--")}</p>
         </div>
         <p class="alert-history-time">${escapeHtml(formatRelativeTime(item.triggeredAt))}</p>
@@ -1706,6 +1801,16 @@ function collectAlertRuleParams(type) {
     return normalizeAlertRuleParams(type, { signal });
   }
 
+  if (type === "rsi_zone") {
+    const zone = String(root.querySelector('[data-alert-param="zone"]')?.value || "both");
+    return normalizeAlertRuleParams(type, { zone });
+  }
+
+  if (type === "kdj_cross") {
+    const signal = String(root.querySelector('[data-alert-param="signal"]')?.value || "both");
+    return normalizeAlertRuleParams(type, { signal });
+  }
+
   const zone = String(root.querySelector('[data-alert-param="zone"]')?.value || "both");
   return normalizeAlertRuleParams(type, { zone });
 }
@@ -1762,6 +1867,11 @@ function normalizeAlertRuleParams(type, rawParams) {
     return { signal };
   }
 
+  if (type === "kdj_cross") {
+    const signal = ["golden", "death", "both"].includes(params.signal) ? params.signal : "both";
+    return { signal };
+  }
+
   const zone = ["overbought", "oversold", "both"].includes(params.zone) ? params.zone : "both";
   return { zone };
 }
@@ -1780,6 +1890,7 @@ function normalizeAlertHistoryRecord(record) {
   const title = String(record.title || "");
   const detail = String(record.detail || "");
   const type = ALERT_RULE_TYPES.has(record.type) ? record.type : "price";
+  const sourceIndicator = String(record.sourceIndicator || "");
   const symbol = String(record.symbol || "");
   const triggeredAt = Number.isFinite(Number(record.triggeredAt)) ? Number(record.triggeredAt) : Date.now();
   return {
@@ -1787,6 +1898,7 @@ function normalizeAlertHistoryRecord(record) {
     ruleId,
     cardId,
     type,
+    sourceIndicator,
     symbol,
     title,
     detail,
@@ -1814,9 +1926,22 @@ function describeAlertRule(rule) {
     if (rule.params.signal === "death") return "MACD 死叉触发";
     return "MACD 金叉/死叉触发";
   }
-  if (rule.params.zone === "overbought") return "RSI 超买 (>= 70)";
-  if (rule.params.zone === "oversold") return "RSI 超卖 (<= 30)";
-  return "RSI 超买/超卖";
+
+  if (rule.type === "rsi_zone") {
+    if (rule.params.zone === "overbought") return "RSI 超买 (>= 70)";
+    if (rule.params.zone === "oversold") return "RSI 超卖 (<= 30)";
+    return "RSI 超买/超卖";
+  }
+
+  if (rule.type === "kdj_cross") {
+    if (rule.params.signal === "golden") return "KDJ 金叉触发";
+    if (rule.params.signal === "death") return "KDJ 死叉触发";
+    return "KDJ 金叉/死叉触发";
+  }
+
+  if (rule.params.zone === "overbought") return "KDJ 超买 (J >= 100)";
+  if (rule.params.zone === "oversold") return "KDJ 超卖 (J <= 0)";
+  return "KDJ 超买/超卖";
 }
 
 function formatCooldown(ms) {
@@ -1876,6 +2001,17 @@ function monitorCardAlerts(card, previousQuote, previousTechnicals) {
       ruleId: rule.id,
       cardId: card.id,
       type: rule.type,
+      sourceIndicator:
+        match.sourceIndicator ||
+        (rule.type === "macd_cross"
+          ? "MACD"
+          : rule.type === "rsi_zone"
+            ? "RSI"
+            : rule.type === "kdj_cross" || rule.type === "kdj_zone"
+              ? "KDJ"
+              : rule.type === "ma_breakout"
+                ? "MA"
+                : "Price"),
       symbol: card.querySymbol || card.symbol || card.name,
       title: match.title,
       detail: match.detail,
@@ -1912,6 +2048,8 @@ function evaluateAlertRule(rule, context) {
   if (rule.type === "ma_breakout") return evaluateMaBreakoutRule(rule, context);
   if (rule.type === "macd_cross") return evaluateMacdRule(rule, context);
   if (rule.type === "rsi_zone") return evaluateRsiRule(rule, context);
+  if (rule.type === "kdj_cross") return evaluateKdjCrossRule(rule, context);
+  if (rule.type === "kdj_zone") return evaluateKdjZoneRule(rule, context);
   return null;
 }
 
@@ -1931,6 +2069,7 @@ function evaluatePriceRule(rule, context) {
     return {
       title: `${context.card.querySymbol || context.card.symbol} 价格上破阈值`,
       detail: `最新价 ${formatNumber(currentPrice, 2, 4)} 高于预设 ${formatNumber(threshold, 2, 4)}`,
+      sourceIndicator: "Price",
     };
   }
 
@@ -1938,6 +2077,7 @@ function evaluatePriceRule(rule, context) {
   return {
     title: `${context.card.querySymbol || context.card.symbol} 价格下破阈值`,
     detail: `最新价 ${formatNumber(currentPrice, 2, 4)} 低于预设 ${formatNumber(threshold, 2, 4)}`,
+    sourceIndicator: "Price",
   };
 }
 
@@ -1956,6 +2096,7 @@ function evaluateChangeRule(rule, context) {
   return {
     title: `${context.card.querySymbol || context.card.symbol} 涨跌幅触发`,
     detail: `当前单日涨跌幅 ${formatSigned(currentPct)}% 已超过 ${formatNumber(threshold, 1, 1)}%`,
+    sourceIndicator: "Change",
   };
 }
 
@@ -1977,6 +2118,7 @@ function evaluateMaBreakoutRule(rule, context) {
   return {
     title: `${context.card.querySymbol || context.card.symbol} ${crossUp ? "上破" : "下破"} ${maKey.toUpperCase()}`,
     detail: `价格 ${formatNumber(currentPrice, 2, 4)}，${maKey.toUpperCase()} ${formatNumber(currentMa, 2, 4)}`,
+    sourceIndicator: "MA",
   };
 }
 
@@ -1999,6 +2141,7 @@ function evaluateMacdRule(rule, context) {
       3,
       3
     )}`,
+    sourceIndicator: "MACD",
   };
 }
 
@@ -2015,6 +2158,56 @@ function evaluateRsiRule(rule, context) {
   return {
     title: `${context.card.querySymbol || context.card.symbol} RSI ${zone}`,
     detail: `RSI14 当前 ${formatNumber(currentRsi, 1, 1)}，进入 ${zone} 区间`,
+    sourceIndicator: "RSI",
+  };
+}
+
+function evaluateKdjCrossRule(rule, context) {
+  const current = context.currentTechnicals?.kdj || null;
+  const previous = context.previousTechnicals?.kdj || null;
+  if (!current || !previous) return null;
+
+  const prevK = toFiniteNumber(previous.k);
+  const prevD = toFiniteNumber(previous.d);
+  const currK = toFiniteNumber(current.k);
+  const currD = toFiniteNumber(current.d);
+  if (![prevK, prevD, currK, currD].every((value) => Number.isFinite(value))) return null;
+
+  const isGolden = prevK < prevD && currK >= currD;
+  const isDeath = prevK > prevD && currK <= currD;
+  if (!isGolden && !isDeath) return null;
+  if (rule.params.signal === "golden" && !isGolden) return null;
+  if (rule.params.signal === "death" && !isDeath) return null;
+
+  return {
+    title: `${context.card.querySymbol || context.card.symbol} KDJ ${isGolden ? "金叉" : "死叉"}`,
+    detail: `K/D/J: ${formatNumber(currK, 1, 1)} / ${formatNumber(currD, 1, 1)} / ${formatNumber(
+      current.j,
+      1,
+      1
+    )}`,
+    sourceIndicator: "KDJ",
+  };
+}
+
+function evaluateKdjZoneRule(rule, context) {
+  const current = context.currentTechnicals?.kdj || null;
+  const previous = context.previousTechnicals?.kdj || null;
+  if (!current || !previous) return null;
+
+  const currentJ = toFiniteNumber(current.j);
+  const previousJ = toFiniteNumber(previous.j);
+  if (!Number.isFinite(currentJ) || !Number.isFinite(previousJ)) return null;
+
+  const currentMatch = isKdjZoneMatched(currentJ, rule.params.zone);
+  const previousMatch = isKdjZoneMatched(previousJ, rule.params.zone);
+  if (!currentMatch || previousMatch) return null;
+
+  const zone = currentJ >= 100 ? "超买" : "超卖";
+  return {
+    title: `${context.card.querySymbol || context.card.symbol} KDJ ${zone}`,
+    detail: `KDJ J 当前 ${formatNumber(currentJ, 1, 1)}，进入 ${zone} 区间`,
+    sourceIndicator: "KDJ",
   };
 }
 
@@ -2028,6 +2221,12 @@ function isRsiZoneMatched(rsi, zone) {
   if (zone === "overbought") return rsi >= 70;
   if (zone === "oversold") return rsi <= 30;
   return rsi >= 70 || rsi <= 30;
+}
+
+function isKdjZoneMatched(jValue, zone) {
+  if (zone === "overbought") return jValue >= 100;
+  if (zone === "oversold") return jValue <= 0;
+  return jValue >= 100 || jValue <= 0;
 }
 
 function emitAlertSignal() {
@@ -2077,11 +2276,17 @@ function countTodayAlerts(history) {
 }
 
 function toFiniteNumber(value) {
+  if (typeof coreUtils.toFiniteNumber === "function") {
+    return coreUtils.toFiniteNumber(value);
+  }
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
 function numberOrNull(value) {
+  if (typeof coreUtils.numberOrNull === "function") {
+    return coreUtils.numberOrNull(value);
+  }
   return toFiniteNumber(value);
 }
 
@@ -3016,75 +3221,24 @@ function describeKdjSignal(kdj) {
 }
 
 function calculateKdjSnapshot(bars, period = 9) {
-  if (!Array.isArray(bars) || bars.length < period) {
-    return {
-      k: null,
-      d: null,
-      j: null,
-      previousK: null,
-      previousD: null,
-      previousJ: null,
-    };
+  if (typeof indicatorUtils.calculateKdjSnapshot === "function") {
+    return indicatorUtils.calculateKdjSnapshot(bars, period);
   }
-
-  let k = 50;
-  let d = 50;
-  const points = [];
-
-  for (let index = 0; index < bars.length; index += 1) {
-    const bar = bars[index];
-    const close = numberOrNull(bar?.close);
-    if (!Number.isFinite(close) || index + 1 < period) {
-      points.push(null);
-      continue;
-    }
-
-    const window = bars.slice(index + 1 - period, index + 1);
-    const lows = window.map((item) => numberOrNull(item?.low)).filter((value) => Number.isFinite(value));
-    const highs = window.map((item) => numberOrNull(item?.high)).filter((value) => Number.isFinite(value));
-    if (!lows.length || !highs.length) {
-      points.push(null);
-      continue;
-    }
-
-    const llv = Math.min(...lows);
-    const hhv = Math.max(...highs);
-    const denominator = hhv - llv;
-    const rsv = denominator <= 0 ? 50 : ((close - llv) / denominator) * 100;
-
-    k = (2 * k + rsv) / 3;
-    d = (2 * d + k) / 3;
-    const j = 3 * k - 2 * d;
-    points.push({ k, d, j });
-  }
-
-  let current = null;
-  let previous = null;
-  for (let index = points.length - 1; index >= 0; index -= 1) {
-    if (!points[index]) continue;
-    if (!current) {
-      current = points[index];
-      continue;
-    }
-    previous = points[index];
-    break;
-  }
-
   return {
-    k: numberOrNull(current?.k),
-    d: numberOrNull(current?.d),
-    j: numberOrNull(current?.j),
-    previousK: numberOrNull(previous?.k),
-    previousD: numberOrNull(previous?.d),
-    previousJ: numberOrNull(previous?.j),
+    k: null,
+    d: null,
+    j: null,
+    previousK: null,
+    previousD: null,
+    previousJ: null,
   };
 }
 
 function calculateSma(values, period) {
-  if (!Array.isArray(values) || values.length < period) return null;
-  const window = values.slice(-period);
-  const sum = window.reduce((acc, value) => acc + value, 0);
-  return sum / period;
+  if (typeof indicatorUtils.calculateSma === "function") {
+    return indicatorUtils.calculateSma(values, period);
+  }
+  return null;
 }
 
 function calculateMacdSnapshot(values) {
@@ -3124,51 +3278,17 @@ function calculateMacdSnapshot(values) {
 }
 
 function calculateEmaSeries(values, period) {
-  if (!Array.isArray(values) || !values.length) return [];
-
-  const multiplier = 2 / (period + 1);
-  let prev = Number(values[0]);
-
-  return values.map((value, index) => {
-    const current = Number(value);
-    if (!Number.isFinite(current)) return prev;
-    if (index === 0 || !Number.isFinite(prev)) {
-      prev = current;
-      return current;
-    }
-    prev = current * multiplier + prev * (1 - multiplier);
-    return prev;
-  });
+  if (typeof indicatorUtils.calculateEmaSeries === "function") {
+    return indicatorUtils.calculateEmaSeries(values, period);
+  }
+  return [];
 }
 
 function calculateRsi(values, period) {
-  if (!Array.isArray(values) || values.length <= period) return null;
-
-  let gain = 0;
-  let loss = 0;
-  for (let index = 1; index <= period; index += 1) {
-    const delta = values[index] - values[index - 1];
-    if (delta >= 0) {
-      gain += delta;
-    } else {
-      loss -= delta;
-    }
+  if (typeof indicatorUtils.calculateRsi === "function") {
+    return indicatorUtils.calculateRsi(values, period);
   }
-
-  let avgGain = gain / period;
-  let avgLoss = loss / period;
-
-  for (let index = period + 1; index < values.length; index += 1) {
-    const delta = values[index] - values[index - 1];
-    const nextGain = delta > 0 ? delta : 0;
-    const nextLoss = delta < 0 ? -delta : 0;
-    avgGain = (avgGain * (period - 1) + nextGain) / period;
-    avgLoss = (avgLoss * (period - 1) + nextLoss) / period;
-  }
-
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - 100 / (1 + rs);
+  return null;
 }
 
 function getDateKey(timestamp) {
@@ -3188,35 +3308,10 @@ function parseCardVisualSize(value) {
 }
 
 function toYahooSymbol(input) {
-  const raw = String(input || "").trim().toUpperCase();
-
-  if (/^\d{6}\.(SH|SS|SZ)$/.test(raw)) {
-    const [code, suffix] = raw.split(".");
-    return `${code}.${suffix === "SH" ? "SS" : suffix}`;
+  if (typeof coreUtils.toYahooSymbol === "function") {
+    return coreUtils.toYahooSymbol(input);
   }
-
-  if (/^(SH|SZ)\d{6}$/.test(raw)) {
-    return `${raw.slice(2)}.${raw.startsWith("SH") ? "SS" : "SZ"}`;
-  }
-
-  if (/^\d{6}$/.test(raw)) {
-    return `${raw}.${raw.startsWith("6") ? "SS" : "SZ"}`;
-  }
-
-  if (/^HK\d{4,5}$/.test(raw)) {
-    return `${raw.slice(2).padStart(4, "0")}.HK`;
-  }
-
-  if (/^\d{4,5}\.HK$/.test(raw)) {
-    const [code] = raw.split(".");
-    return `${code.padStart(4, "0")}.HK`;
-  }
-
-  if (/^\d{4,5}$/.test(raw)) {
-    return `${raw.padStart(4, "0")}.HK`;
-  }
-
-  return raw;
+  return String(input || "").trim().toUpperCase();
 }
 
 function normalizeErrorMessage(error) {
@@ -3286,6 +3381,9 @@ function getTimeFormatter(timeZone) {
 }
 
 function formatNumber(value, minDigits = 2, maxDigits = 2) {
+  if (typeof coreUtils.formatNumber === "function") {
+    return coreUtils.formatNumber(value, minDigits, maxDigits);
+  }
   if (value == null || Number.isNaN(value)) return "--";
   return Number(value).toLocaleString(undefined, {
     minimumFractionDigits: minDigits,
@@ -3294,26 +3392,25 @@ function formatNumber(value, minDigits = 2, maxDigits = 2) {
 }
 
 function formatSigned(value) {
+  if (typeof coreUtils.formatSigned === "function") {
+    return coreUtils.formatSigned(value);
+  }
   if (value == null || Number.isNaN(value)) return "--";
-  const abs = Math.abs(value);
-  const fixed = abs.toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-  return `${value >= 0 ? "+" : "-"}${fixed}`;
+  return `${value >= 0 ? "+" : "-"}${Math.abs(value).toFixed(2)}`;
 }
 
 function formatSignedFixed(value, digits = 2) {
+  if (typeof coreUtils.formatSignedFixed === "function") {
+    return coreUtils.formatSignedFixed(value, digits);
+  }
   if (value == null || Number.isNaN(value)) return "--";
-  const abs = Math.abs(value);
-  const fixed = abs.toLocaleString(undefined, {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  });
-  return `${value >= 0 ? "+" : "-"}${fixed}`;
+  return `${value >= 0 ? "+" : "-"}${Math.abs(value).toFixed(digits)}`;
 }
 
 function formatCompact(value) {
+  if (typeof coreUtils.formatCompact === "function") {
+    return coreUtils.formatCompact(value);
+  }
   if (value == null || Number.isNaN(value)) return "--";
   return Number(value).toLocaleString(undefined, {
     notation: "compact",
@@ -3360,12 +3457,10 @@ function buildPnlRatioValue(currentPrice, costPrice) {
 }
 
 function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+  if (typeof coreUtils.escapeHtml === "function") {
+    return coreUtils.escapeHtml(value);
+  }
+  return String(value ?? "");
 }
 
 function buildMarketClosedStatus(label) {
@@ -3373,15 +3468,10 @@ function buildMarketClosedStatus(label) {
 }
 
 function debounce(fn, waitMs) {
-  let timer = null;
-  return (...args) =>
-    new Promise((resolve) => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(async () => {
-        timer = null;
-        resolve(await fn(...args));
-      }, waitMs);
-    });
+  if (typeof coreUtils.debounce === "function") {
+    return coreUtils.debounce(fn, waitMs);
+  }
+  return fn;
 }
 
 init().catch(() => {

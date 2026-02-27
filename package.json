@@ -1,0 +1,9 @@
+{
+  "name": "price_query",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "check": "node --check app.js && node --check analysis.js && node --check server.js"
+  }
+}
