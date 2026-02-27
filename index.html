@@ -3,7 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>股票卡片看板 MVP</title>
+    <title>Workspace Overview</title>
+    <meta name="theme-color" content="#f3f4f6" />
+    <meta name="description" content="A low-profile workspace dashboard for monitoring personal signals and reading queues." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2" sizes="any" />
+    <link rel="shortcut icon" href="/favicon.svg?v=2" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -17,29 +21,109 @@
     <div class="bg-orb orb-right"></div>
 
     <header class="topbar">
-      <div>
-        <p class="eyebrow">Stock Card Dashboard</p>
-        <h1>卡片式行情管理</h1>
+      <div class="topbar-brand">
+        <img src="/favicon.svg?v=2" alt="Workspace Icon" class="brand-icon" />
+        <p class="eyebrow">Workspace Overview</p>
+        <h1>工作总览</h1>
       </div>
-      <button id="createCardBtn" class="btn btn-primary">新建卡片</button>
+      <div class="topbar-actions">
+        <a href="./analysis.html" class="btn btn-ghost">分析</a>
+        <button id="createCardBtn" class="btn btn-primary">新建</button>
+      </div>
     </header>
 
     <main>
-      <section class="toolbar">
-        <div class="toolbar-item">
-          <span class="label">卡片总数</span>
-          <strong id="cardCount">0</strong>
-        </div>
-        <div class="toolbar-item">
-          <span class="label">自动刷新中</span>
-          <strong id="autoRefreshCount">0</strong>
-        </div>
-      </section>
-
       <section id="cardGrid" class="card-grid"></section>
       <p id="emptyState" class="empty-state">
-        还没有卡片，点击右上角“新建卡片”开始添加股票行情。
+        还没有内容，点击右上角“新建”添加模块。
       </p>
+      <p class="footer-meta">
+        <span>卡片总数 <strong id="cardCount">0</strong></span>
+        <span>自动刷新中 <strong id="autoRefreshCount">0</strong></span>
+      </p>
+
+      <section id="alertWorkbench" class="alert-workbench">
+        <header class="alert-workbench-head">
+          <div>
+            <p class="eyebrow">Work Notification</p>
+            <h2>工作通知中心</h2>
+          </div>
+          <button type="button" id="alertCollapseBtn" class="btn btn-ghost">收起</button>
+        </header>
+
+        <div id="alertWorkbenchBody" class="alert-workbench-body">
+          <section class="alert-switch-grid">
+            <label><input id="alertCenterToggle" type="checkbox" checked /> 启用预警引擎</label>
+            <label><input id="alertSilentToggle" type="checkbox" checked /> 静默通知</label>
+            <label><input id="alertSoundToggle" type="checkbox" /> 声音提醒</label>
+            <label><input id="alertVibrationToggle" type="checkbox" /> 震动提醒</label>
+            <label><input id="alertLowPowerToggle" type="checkbox" /> 低功耗监控</label>
+          </section>
+
+          <section class="alert-stats-grid">
+            <article class="alert-stat">
+              <span class="label">规则总数</span>
+              <strong id="alertRuleCount">0</strong>
+            </article>
+            <article class="alert-stat">
+              <span class="label">启用规则</span>
+              <strong id="alertEnabledRuleCount">0</strong>
+            </article>
+            <article class="alert-stat">
+              <span class="label">今日触发</span>
+              <strong id="alertTodayCount">0</strong>
+            </article>
+            <article class="alert-stat">
+              <span class="label">累计触发</span>
+              <strong id="alertTotalCount">0</strong>
+            </article>
+          </section>
+
+          <form id="alertRuleForm" class="alert-rule-form">
+            <label class="alert-field">
+              <span>标的</span>
+              <select id="alertRuleCardSelect"></select>
+            </label>
+            <label class="alert-field">
+              <span>规则类型</span>
+              <select id="alertRuleTypeSelect">
+                <option value="price" selected>价格阈值</option>
+                <option value="change">涨跌幅监控</option>
+                <option value="ma_breakout">MA 突破检测</option>
+                <option value="macd_cross">MACD 金叉/死叉</option>
+                <option value="rsi_zone">RSI 超买超卖</option>
+              </select>
+            </label>
+            <div id="alertRuleParams" class="alert-rule-params"></div>
+            <label class="alert-field">
+              <span>冷却时间</span>
+              <select id="alertRuleCooldownSelect">
+                <option value="60000">1 分钟</option>
+                <option value="180000">3 分钟</option>
+                <option value="300000" selected>5 分钟</option>
+                <option value="900000">15 分钟</option>
+                <option value="1800000">30 分钟</option>
+              </select>
+            </label>
+            <button type="submit" class="btn btn-primary">新增规则</button>
+          </form>
+
+          <div class="alert-toolbar">
+            <button type="button" id="alertToggleAllRulesBtn" class="btn btn-ghost">一键启用/禁用</button>
+            <button type="button" id="alertClearHistoryBtn" class="btn btn-ghost">清空历史</button>
+          </div>
+
+          <section class="alert-panel-block">
+            <h3>规则列表</h3>
+            <div id="alertRuleList" class="alert-rule-list"></div>
+          </section>
+
+          <section class="alert-panel-block">
+            <h3>历史通知</h3>
+            <div id="alertHistoryList" class="alert-history-list"></div>
+          </section>
+        </div>
+      </section>
     </main>
 
     <dialog id="createDialog" class="modal">
@@ -53,13 +137,22 @@
           卡片类型
           <select id="cardType" required>
             <option value="stock">股票</option>
+            <option value="hn">Hacker News 热门</option>
+            <option value="quote">Quote / 思维片段</option>
           </select>
         </label>
 
-        <label>
-          股票代码
-          <input id="symbolInput" type="text" placeholder="如 sh600519 / AAPL / TSLA" required />
+        <label id="stockSymbolField">
+          股票代码或名称
+          <input
+            id="symbolInput"
+            type="text"
+            list="stockSuggestList"
+            autocomplete="off"
+            placeholder="如 贵州茅台 / 600519 / AAPL"
+          />
         </label>
+        <datalist id="stockSuggestList"></datalist>
 
         <label>
           卡片标题（可选）
@@ -77,7 +170,16 @@
           </select>
         </label>
 
-        <label>
+        <label id="createCardVisualField">
+          卡片尺寸
+          <select id="cardVisualSize">
+            <option value="compact">紧凑</option>
+            <option value="standard" selected>标准</option>
+            <option value="expanded">扩展</option>
+          </select>
+        </label>
+
+        <label id="stockCostField">
           成本价（可选）
           <input
             id="costInput"
@@ -89,20 +191,23 @@
           />
         </label>
 
-        <fieldset class="permission-set">
+        <label id="hnLimitField" class="is-hidden">
+          热门条数
+          <input id="hnLimitInput" type="number" min="3" max="20" step="1" value="8" />
+        </label>
+
+        <label id="quoteTopicField" class="is-hidden">
+          片段主题
+          <select id="quoteTopicInput">
+            <option value="mixed" selected>混合</option>
+            <option value="economics">经济学</option>
+            <option value="philosophy">哲学</option>
+            <option value="engineering">工程</option>
+          </select>
+        </label>
+
+        <fieldset class="permission-set" id="createPermissionContainer">
           <legend>自定义权限</legend>
-          <label><input type="checkbox" data-permission="showPrice" checked /> 显示最新价</label>
-          <label><input type="checkbox" data-permission="showChange" checked /> 显示涨跌</label>
-          <label><input type="checkbox" data-permission="showHighLow" checked /> 显示当日高低</label>
-          <label><input type="checkbox" data-permission="showVolume" checked /> 显示成交量</label>
-          <label><input type="checkbox" data-permission="showTimestamp" checked /> 显示更新时间</label>
-          <label><input type="checkbox" data-permission="showPnL" checked /> 显示盈亏比例</label>
-          <label><input type="checkbox" data-permission="showChart" checked /> 显示行情曲线</label>
-          <label><input type="checkbox" data-permission="showVolumeChart" checked /> 显示分时量图</label>
-          <label><input type="checkbox" data-permission="allowManualRefresh" checked /> 允许手动刷新</label>
-          <label><input type="checkbox" data-permission="allowEdit" checked /> 允许编辑权限</label>
-          <label><input type="checkbox" data-permission="allowDelete" checked /> 允许删除卡片</label>
-          <label><input type="checkbox" data-permission="autoRefresh" checked /> 启用自动刷新</label>
         </fieldset>
 
         <button type="submit" class="btn btn-primary">创建卡片</button>
@@ -129,7 +234,16 @@
           </select>
         </label>
 
-        <label>
+        <label id="permissionCardVisualField">
+          卡片尺寸
+          <select id="permissionCardVisualSize">
+            <option value="compact">紧凑</option>
+            <option value="standard">标准</option>
+            <option value="expanded">扩展</option>
+          </select>
+        </label>
+
+        <label id="permissionCostField">
           成本价（可选）
           <input
             id="permissionCostInput"
@@ -139,6 +253,21 @@
             min="0"
             placeholder="如 53.8000"
           />
+        </label>
+
+        <label id="permissionHnLimitField" class="is-hidden">
+          热门条数
+          <input id="permissionHnLimitInput" type="number" min="3" max="20" step="1" value="8" />
+        </label>
+
+        <label id="permissionQuoteTopicField" class="is-hidden">
+          片段主题
+          <select id="permissionQuoteTopicInput">
+            <option value="mixed">混合</option>
+            <option value="economics">经济学</option>
+            <option value="philosophy">哲学</option>
+            <option value="engineering">工程</option>
+          </select>
         </label>
 
         <fieldset class="permission-set" id="permissionContainer">
@@ -162,6 +291,8 @@
         <section class="metrics"></section>
         <section class="chart-wrap"></section>
         <section class="volume-wrap"></section>
+        <section class="news-wrap"></section>
+        <section class="quote-wrap"></section>
 
         <footer class="status-row">
           <span class="status-text">等待刷新</span>

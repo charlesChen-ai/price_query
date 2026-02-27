@@ -5,12 +5,88 @@ const path = require("path");
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 8000);
 const STATE_FILE = path.join(ROOT, ".dashboard-state.json");
+const HN_TOP_STORIES_URL = "https://hacker-news.firebaseio.com/v0/topstories.json";
+const EASTMONEY_SEARCH_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8";
+const EASTMONEY_HISTORY_TOKEN = "fa5fd1943c7b386f172d6893dbfba10b";
+const QUOTE_TOPICS = new Set(["mixed", "economics", "philosophy", "engineering"]);
+const ALERT_HISTORY_LIMIT = 200;
+const QUOTE_LIBRARY = {
+  economics: [
+    {
+      text: "价格不是数字本身，而是无数决策在特定时刻达成的妥协。市场越复杂，单点解释就越危险。",
+      author: "Signal Notebook",
+      source: "Economics Fragment",
+    },
+    {
+      text: "大多数人高估短期波动的意义，却低估长期复利的力量。耐心本身也是一种稀缺资产。",
+      author: "Signal Notebook",
+      source: "Economics Fragment",
+    },
+    {
+      text: "风险从来不是回撤之后才出现的，它在仓位形成的那一刻就已经存在。",
+      author: "Signal Notebook",
+      source: "Economics Fragment",
+    },
+    {
+      text: "宏观叙事决定方向感，微观结构决定执行质量。两者缺一，判断就会失真。",
+      author: "Signal Notebook",
+      source: "Economics Fragment",
+    },
+  ],
+  philosophy: [
+    {
+      text: "清晰不来自更多信息，而来自更少但更关键的问题。先问什么是必须知道的，再问剩下的。",
+      author: "Signal Notebook",
+      source: "Philosophy Fragment",
+    },
+    {
+      text: "你无法控制结果，但可以设计过程。过程稳定，结果才有可讨论性。",
+      author: "Signal Notebook",
+      source: "Philosophy Fragment",
+    },
+    {
+      text: "错误并不可怕，可怕的是用更复杂的解释去掩盖简单的错误。",
+      author: "Signal Notebook",
+      source: "Philosophy Fragment",
+    },
+    {
+      text: "认知的边界往往不是知识不足，而是我们不愿意承认自己正在猜测。",
+      author: "Signal Notebook",
+      source: "Philosophy Fragment",
+    },
+  ],
+  engineering: [
+    {
+      text: "系统稳定不是因为没有故障，而是因为故障发生时仍有可预期的退化路径。",
+      author: "Signal Notebook",
+      source: "Engineering Fragment",
+    },
+    {
+      text: "工程中的“快”不是省略步骤，而是持续减少返工。一次性跑通，通常比反复修补更快。",
+      author: "Signal Notebook",
+      source: "Engineering Fragment",
+    },
+    {
+      text: "可观测性不是锦上添花，它是系统在压力下保持可控的前提条件。",
+      author: "Signal Notebook",
+      source: "Engineering Fragment",
+    },
+    {
+      text: "好的抽象会隐藏复杂度，坏的抽象会隐藏问题。两者表面都很干净，结果完全不同。",
+      author: "Signal Notebook",
+      source: "Engineering Fragment",
+    },
+  ],
+};
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".png": "image/png",
 };
 
 const server = http.createServer(async (req, res) => {
@@ -19,6 +95,26 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/quote") {
       await handleQuote(url, res);
+      return;
+    }
+
+    if (url.pathname === "/api/quote/snippet") {
+      await handleQuoteSnippet(url, res);
+      return;
+    }
+
+    if (url.pathname === "/api/stock/search") {
+      await handleStockSearch(url, res);
+      return;
+    }
+
+    if (url.pathname === "/api/stock/history") {
+      await handleStockHistory(url, res);
+      return;
+    }
+
+    if (url.pathname === "/api/hn/top") {
+      await handleHnTop(url, res);
       return;
     }
 
@@ -95,8 +191,13 @@ async function handleState(req, res) {
       return;
     }
 
+    const currentState = await readStateFile();
+    const normalizedAlerts = Object.prototype.hasOwnProperty.call(payload, "alerts")
+      ? normalizeAlertState(payload.alerts)
+      : normalizeAlertState(currentState.alerts);
     await writeStateFile({
       cards: payload.cards,
+      alerts: normalizedAlerts,
       updatedAt: Date.now(),
     });
     sendJson(res, 200, { ok: true });
@@ -104,6 +205,112 @@ async function handleState(req, res) {
   }
 
   sendJson(res, 405, { error: "Method Not Allowed" });
+}
+
+async function handleQuoteSnippet(url, res) {
+  const topic = parseQuoteTopic(url.searchParams.get("topic"));
+  const count = clampQuoteCount(url.searchParams.get("count"));
+
+  const pool =
+    topic === "mixed"
+      ? [...QUOTE_LIBRARY.economics, ...QUOTE_LIBRARY.philosophy, ...QUOTE_LIBRARY.engineering]
+      : QUOTE_LIBRARY[topic];
+
+  const items = sampleQuoteItems(pool, count).map((item) => ({
+    ...item,
+    topic: topic === "mixed" ? inferQuoteTopic(item.source) : topic,
+    timestamp: Date.now(),
+  }));
+
+  sendJson(res, 200, {
+    topic,
+    items,
+  });
+}
+
+async function handleStockSearch(url, res) {
+  const query = (url.searchParams.get("q") || "").trim();
+  const limit = clampStockSearchLimit(url.searchParams.get("limit"));
+  if (!query) {
+    sendJson(res, 200, { items: [] });
+    return;
+  }
+
+  const params = new URLSearchParams({
+    input: query,
+    type: "14",
+    token: EASTMONEY_SEARCH_TOKEN,
+    count: String(limit),
+  });
+
+  try {
+    const endpoint = `https://searchapi.eastmoney.com/api/suggest/get?${params.toString()}`;
+    const payload = await fetchJson(endpoint);
+    const rows = Array.isArray(payload?.QuotationCodeTable?.Data)
+      ? payload.QuotationCodeTable.Data
+      : [];
+
+    const items = rows.map(normalizeStockSearchItem).filter(Boolean);
+    sendJson(res, 200, { items });
+  } catch {
+    sendJson(res, 200, { items: [] });
+  }
+}
+
+async function handleStockHistory(url, res) {
+  const input = (url.searchParams.get("symbol") || "").trim();
+  const days = clampStockHistoryDays(url.searchParams.get("days"));
+  if (!input) {
+    sendJson(res, 400, { error: "缺少 symbol 参数" });
+    return;
+  }
+
+  const local = parseCnSymbol(input);
+  if (local) {
+    try {
+      const payload = await fetchEastMoneyHistory(local, days);
+      sendJson(res, 200, payload);
+      return;
+    } catch {
+      // Fall through to Yahoo fallback.
+    }
+  }
+
+  try {
+    const payload = await fetchYahooHistory(toYahooSymbol(input), days);
+    sendJson(res, 200, payload);
+  } catch (error) {
+    sendJson(res, 502, {
+      error: `无法获取 ${input} 历史行情：${normalizeError(error)}`,
+    });
+  }
+}
+
+async function handleHnTop(url, res) {
+  const limit = clampHnLimit(url.searchParams.get("limit"));
+  const topIds = await fetchJson(HN_TOP_STORIES_URL);
+
+  if (!Array.isArray(topIds) || !topIds.length) {
+    sendJson(res, 502, { error: "Hacker News 热门列表为空" });
+    return;
+  }
+
+  const ids = topIds.slice(0, limit);
+  const items = await Promise.all(
+    ids.map(async (id) => {
+      try {
+        const item = await fetchJson(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
+        return normalizeHnItem(item);
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  sendJson(res, 200, {
+    items: items.filter(Boolean),
+    source: "hacker-news",
+  });
 }
 
 async function handleStatic(pathname, res) {
@@ -156,6 +363,7 @@ async function fetchEastMoneyQuote(local) {
     symbol: `${local.code}.${local.market === "SH" ? "SS" : "SZ"}`,
     name: data.f58 || `${local.market}${local.code}`,
     price,
+    prevClose,
     change,
     changePercent,
     high: scalePrice(data.f44),
@@ -200,6 +408,7 @@ async function fetchTencentQuote(local) {
     symbol: `${local.code}.${local.market === "SH" ? "SS" : "SZ"}`,
     name: parts[1] || `${local.market}${local.code}`,
     price,
+    prevClose,
     change,
     changePercent,
     high: numberOrNull(parts[33]),
@@ -228,6 +437,7 @@ async function fetchYahooQuote(symbol) {
     symbol: quote.symbol,
     name: quote.shortName || quote.longName || symbol,
     price: quote.regularMarketPrice,
+    prevClose: quote.regularMarketPreviousClose,
     change: quote.regularMarketChange,
     changePercent: quote.regularMarketChangePercent,
     high: quote.regularMarketDayHigh,
@@ -237,6 +447,108 @@ async function fetchYahooQuote(symbol) {
     timestamp: quote.regularMarketTime ? quote.regularMarketTime * 1000 : Date.now(),
     source: "yahoo",
   };
+}
+
+async function fetchEastMoneyHistory(local, limit) {
+  const secid = `${local.market === "SH" ? "1" : "0"}.${local.code}`;
+  const params = new URLSearchParams({
+    secid,
+    ut: EASTMONEY_HISTORY_TOKEN,
+    fields1: "f1,f2,f3,f4,f5,f6",
+    fields2: "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+    klt: "101",
+    fqt: "1",
+    beg: "0",
+    end: "20500101",
+    lmt: String(limit),
+  });
+  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?${params.toString()}`;
+
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`EastMoney History HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const data = payload?.data;
+  const rows = Array.isArray(data?.klines) ? data.klines : [];
+  const items = rows.map(parseEastMoneyKline).filter(Boolean);
+  if (!items.length) {
+    throw new Error("EastMoney 历史数据为空");
+  }
+
+  return {
+    symbol: `${local.code}.${local.market === "SH" ? "SS" : "SZ"}`,
+    name: data?.name || `${local.market}${local.code}`,
+    interval: "1d",
+    source: "eastmoney",
+    items,
+  };
+}
+
+async function fetchYahooHistory(symbol, limit) {
+  const end = Math.floor(Date.now() / 1000);
+  const start = end - resolveHistoryWindowSeconds(limit);
+  const params = new URLSearchParams({
+    interval: "1d",
+    includePrePost: "false",
+    events: "div,splits",
+    period1: String(start),
+    period2: String(end),
+  });
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?${params.toString()}`;
+
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Yahoo History HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const result = payload?.chart?.result?.[0];
+  const quote = result?.indicators?.quote?.[0];
+  const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
+  const closes = Array.isArray(quote?.close) ? quote.close : [];
+  const opens = Array.isArray(quote?.open) ? quote.open : [];
+  const highs = Array.isArray(quote?.high) ? quote.high : [];
+  const lows = Array.isArray(quote?.low) ? quote.low : [];
+  const volumes = Array.isArray(quote?.volume) ? quote.volume : [];
+
+  const items = timestamps
+    .map((ts, index) => {
+      const close = numberOrNull(closes[index]);
+      if (!Number.isFinite(close)) return null;
+
+      return {
+        date: new Date(Number(ts) * 1000).toISOString().slice(0, 10),
+        open: numberOrNull(opens[index]),
+        close,
+        high: numberOrNull(highs[index]),
+        low: numberOrNull(lows[index]),
+        volume: numberOrNull(volumes[index]),
+      };
+    })
+    .filter(Boolean)
+    .slice(-limit);
+
+  if (!items.length) {
+    throw new Error("Yahoo 历史数据为空");
+  }
+
+  return {
+    symbol,
+    name: result?.meta?.symbol || symbol,
+    interval: "1d",
+    source: "yahoo",
+    items,
+  };
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json();
 }
 
 function parseCnSymbol(input) {
@@ -313,20 +625,184 @@ function parseTencentTime(value) {
   return new Date(y, m - 1, d, hh, mm, ss).getTime();
 }
 
+function clampStockHistoryDays(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return 160;
+  return Math.min(260, Math.max(30, Math.round(num)));
+}
+
+function clampStockSearchLimit(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return 8;
+  return Math.min(20, Math.max(3, Math.round(num)));
+}
+
+function parseEastMoneyKline(row) {
+  if (typeof row !== "string") return null;
+  const parts = row.split(",");
+  if (parts.length < 6) return null;
+
+  const [date, open, close, high, low, volume] = parts;
+  const normalizedClose = numberOrNull(close);
+  if (!date || !Number.isFinite(normalizedClose)) return null;
+
+  return {
+    date,
+    open: numberOrNull(open),
+    close: normalizedClose,
+    high: numberOrNull(high),
+    low: numberOrNull(low),
+    volume: numberOrNull(volume),
+  };
+}
+
+function normalizeStockSearchItem(item) {
+  if (!item) return null;
+
+  const code = String(item.Code || item.SecurityCode || "").trim();
+  const name = String(item.Name || item.ShortName || "").trim();
+  if (!code || !name) return null;
+
+  const marketNum = String(item.MktNum || "").trim();
+  const securityTypeName = String(item.SecurityTypeName || "").trim();
+
+  let querySymbol = "";
+  if (marketNum === "1") {
+    querySymbol = `${code}.SS`;
+  } else if (marketNum === "0") {
+    querySymbol = `${code}.SZ`;
+  } else if (/港/i.test(securityTypeName) && /^\d{4,5}$/.test(code)) {
+    querySymbol = `${code.padStart(4, "0")}.HK`;
+  } else {
+    querySymbol = toYahooSymbol(code);
+  }
+
+  return {
+    code,
+    name,
+    querySymbol,
+    marketNum,
+    securityTypeName,
+  };
+}
+
+function resolveHistoryWindowSeconds(limit) {
+  const tradingDays = Math.max(30, Number(limit) || 160);
+  return tradingDays * 24 * 60 * 60 * 3;
+}
+
+function clampHnLimit(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return 8;
+  return Math.min(20, Math.max(3, Math.round(num)));
+}
+
+function normalizeHnItem(item) {
+  if (!item || item.deleted || item.dead || !item.id || !item.title) return null;
+  const fallbackUrl = `https://news.ycombinator.com/item?id=${item.id}`;
+  return {
+    id: item.id,
+    title: String(item.title),
+    url: item.url || fallbackUrl,
+    by: item.by || "unknown",
+    score: Number.isFinite(item.score) ? item.score : 0,
+    descendants: Number.isFinite(item.descendants) ? item.descendants : 0,
+    time: Number.isFinite(item.time) ? item.time * 1000 : Date.now(),
+    domain: extractDomain(item.url),
+  };
+}
+
+function parseQuoteTopic(raw) {
+  const normalized = String(raw || "").trim().toLowerCase();
+  if (QUOTE_TOPICS.has(normalized)) return normalized;
+  return "mixed";
+}
+
+function clampQuoteCount(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return 1;
+  return Math.min(3, Math.max(1, Math.round(num)));
+}
+
+function sampleQuoteItems(pool, count) {
+  if (!Array.isArray(pool) || !pool.length) return [];
+  const copied = [...pool];
+  for (let i = copied.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copied[i], copied[j]] = [copied[j], copied[i]];
+  }
+  return copied.slice(0, count);
+}
+
+function inferQuoteTopic(source) {
+  const text = String(source || "").toLowerCase();
+  if (text.includes("economics")) return "economics";
+  if (text.includes("philosophy")) return "philosophy";
+  if (text.includes("engineering")) return "engineering";
+  return "mixed";
+}
+
+function extractDomain(url) {
+  if (!url) return "news.ycombinator.com";
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "news.ycombinator.com";
+  }
+}
+
 async function readStateFile() {
   try {
     const raw = await fs.readFile(STATE_FILE, "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || !Array.isArray(parsed.cards)) {
-      return { cards: [] };
+      return { cards: [], alerts: normalizeAlertState(null) };
     }
-    return parsed;
+    return {
+      ...parsed,
+      cards: parsed.cards,
+      alerts: normalizeAlertState(parsed.alerts),
+    };
   } catch (error) {
     if (error && error.code === "ENOENT") {
-      return { cards: [] };
+      return { cards: [], alerts: normalizeAlertState(null) };
     }
     throw error;
   }
+}
+
+function normalizeAlertState(alerts) {
+  const fallback = {
+    enabled: true,
+    silentMode: true,
+    lowPowerMode: false,
+    soundEnabled: false,
+    vibrationEnabled: false,
+    panelCollapsed: false,
+    rules: [],
+    history: [],
+    totalTriggered: 0,
+  };
+
+  if (!alerts || typeof alerts !== "object") {
+    return fallback;
+  }
+
+  return {
+    ...fallback,
+    ...alerts,
+    enabled: typeof alerts.enabled === "boolean" ? alerts.enabled : fallback.enabled,
+    silentMode: typeof alerts.silentMode === "boolean" ? alerts.silentMode : fallback.silentMode,
+    lowPowerMode: typeof alerts.lowPowerMode === "boolean" ? alerts.lowPowerMode : fallback.lowPowerMode,
+    soundEnabled: typeof alerts.soundEnabled === "boolean" ? alerts.soundEnabled : fallback.soundEnabled,
+    vibrationEnabled: typeof alerts.vibrationEnabled === "boolean" ? alerts.vibrationEnabled : fallback.vibrationEnabled,
+    panelCollapsed: typeof alerts.panelCollapsed === "boolean" ? alerts.panelCollapsed : fallback.panelCollapsed,
+    totalTriggered: Number.isFinite(Number(alerts.totalTriggered))
+      ? Math.max(0, Number(alerts.totalTriggered))
+      : fallback.totalTriggered,
+    rules: Array.isArray(alerts.rules) ? alerts.rules : [],
+    history: Array.isArray(alerts.history) ? alerts.history.slice(-ALERT_HISTORY_LIMIT) : [],
+  };
 }
 
 async function writeStateFile(payload) {
