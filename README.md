@@ -1,125 +1,151 @@
-# 股票卡片看板（MVP）
+# Personal Signal Monitor
 
-一个卡片式的股票行情前端 Demo，支持为每张卡片配置权限、设置成本价并实时计算盈亏比例，适合做个人盯盘面板的基础版本。
+A low-profile, card-based workspace for tracking market signals, reading curated information, and running lightweight strategy analysis/backtests.
 
-## 核心能力
+> Current stage: MVP. Focused on stock monitoring + analysis workflow.
 
-- 新建股票卡片：输入代码/名称后生成独立行情卡片
-- 权限化展示：按卡片维度控制显示项和操作项
-- 实时行情：按配置频率自动刷新，支持手动刷新
-- 可视化：
-  - 价格折线图（随行情刷新更新）
-  - 分时量柱状图（基于每次刷新的成交量增量）
-- 成本价与盈亏：支持 4 位小数成本价，自动计算盈亏比例
-- 闭市暂停：交易时段外自动停止拉取，开市后自动恢复
-- 预警引擎：
-  - 规则类型：价格阈值、单日涨跌幅、MA 突破、MACD 金叉死叉、RSI 超买超卖、KDJ 金叉死叉/区间
-  - 触发机制：基于实时刷新结果和技术指标变化检测，支持规则冷却时间去重
-  - 通知方式：工作通知流（静默）、可选声音/震动、低功耗监控模式
-  - 管理能力：规则列表、历史记录、触发统计、一键启用/禁用
-- 持久化：
-  - 浏览器 `localStorage` 兜底
-  - 服务端 `.dashboard-state.json` 持久化
-  - `revision` 冲突检测，避免多标签页互相覆盖状态
-- 历史分析与策略回测：
-  - 策略类型：MA 交叉、MACD、RSI、价格突破、组合策略
-  - 参数维度：周期（日/周/月）、仓位、止损止盈、手续费、滑点、持仓周期
-  - 结果面板：收益曲线（策略 vs 基准）、年化收益、最大回撤、夏普、盈亏比、交易明细
+## Highlights
 
-## 技术栈
+- Card-based dashboard
+  - Stock Quote Card (real-time quote, mini chart, intraday volume, PnL with cost basis)
+  - Hacker News Top Card
+  - Quote / Thinking Snippet Card
+- Fine-grained per-card permissions
+  - Show/hide metrics and visuals
+  - Enable/disable manual actions
+  - Auto-refresh control
+- Technical and alert engine
+  - MA / MACD / RSI / KDJ snapshots
+  - Alert rules: `price`, `change`, `ma_breakout`, `macd_cross`, `rsi_zone`, `kdj_cross`, `kdj_zone`
+  - Cooldown, silent mode, low-power scan mode, history stream
+- Historical analysis & backtest page
+  - Multi-strategy presets with configurable execution params
+  - Timeline playback + signal markers
+  - Strategy equity curve vs benchmark
+  - CSV export (`history`, `technicals`, `backtest`)
+- Safe persistence
+  - Local fallback: `localStorage`
+  - Server persistence: `.dashboard-state.json`
+  - Revision-based conflict handling to prevent multi-tab overwrite
 
-- 前端：原生 HTML/CSS/JavaScript
-- 后端：Node.js 原生 `http`（无框架）
-- 行情数据源（按优先级）：
-  1. EastMoney（A 股优先）
-  2. 腾讯行情（A 股兜底）
-  3. Yahoo Finance（通用兜底）
+## Screens and Routes
 
-## 快速开始
+- Dashboard: `/` (`index.html`)
+- Analysis: `/analysis.html`
 
-### 1. 启动服务
+## Tech Stack
+
+- Frontend: Vanilla HTML / CSS / JavaScript
+- Backend: Node.js native `http`
+- Data sources (fallback chain):
+  1. EastMoney (CN stocks preferred)
+  2. Tencent Quote (CN fallback)
+  3. Yahoo Finance (global fallback)
+- CI/Test:
+  - Node native test runner (`node --test`)
+  - GitHub Actions CI
+
+## Quick Start
+
+### Requirements
+
+- Node.js 18+
+
+### Run
 
 ```bash
 node server.js
 ```
 
-默认地址：
+Open:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-### 2. 打开页面
-
-在浏览器访问 `http://127.0.0.1:8000`。  
-建议不要直接用 `file://` 打开 `index.html`，否则会影响接口请求与状态持久化。
-
-## 目录结构
-
-```text
-.
-├── index.html        # 页面结构（卡片、新建弹窗、权限弹窗）
-├── styles.css        # 样式与图表视觉
-├── app.js            # 前端交互、行情刷新、权限逻辑、持久化
-├── server.js         # 本地静态服务 + 行情代理 + 状态持久化接口
-├── docs/
-│   ├── alert-engine-architecture.md
-│   └── strategy-backtest-architecture.md
-└── .dashboard-state.json   # 卡片状态持久化文件
-```
-
-## 状态持久化说明
-
-- 前端会在变更时同步写入：
-  - `localStorage`（键：`stock_dashboard_cards_v1`）
-  - `localStorage`（键：`stock_dashboard_alert_engine_v1`）
-  - `POST /api/state`（落盘到 `.dashboard-state.json`，包含 cards + alerts + revision）
-- 页面加载时优先读取 `GET /api/state`，远端为空时回退到本地数据。
-- 发生并发写入冲突时，服务端返回 `409` 与最新快照，前端会自动合并并重试。
-
-## 开发验证
+### Development Checks
 
 ```bash
 npm run check
 npm test
 ```
 
-项目使用 Node 原生测试与 GitHub Actions CI（PR 自动执行语法检查与测试）。
+## Project Structure
 
-## 当前限制
+```text
+.
+├── index.html
+├── analysis.html
+├── app.js
+├── analysis.js
+├── styles.css
+├── server.js
+├── core/
+│   ├── shared-utils.js
+│   ├── indicator-utils.js
+│   ├── signal-policy.js
+│   └── state-merge.js
+├── tests/
+├── docs/
+│   ├── alert-engine-architecture.md
+│   └── strategy-backtest-architecture.md
+└── .dashboard-state.json   # runtime state (ignored by git)
+```
 
-- 交易时段按常规时间段判断，未接入法定节假日/临停日历
-- 分时量图是按刷新间隔估算的成交量增量，不是逐笔级别
-- 当前为单用户本地服务模型，未做登录鉴权
+## Persistence Model
 
-## 未来可扩展方向
+- Frontend writes:
+  - `localStorage` key: `stock_dashboard_cards_v1`
+  - `localStorage` key: `stock_dashboard_alert_engine_v1`
+- Server writes:
+  - `POST /api/state` -> `.dashboard-state.json`
+- Conflict safety:
+  - `GET /api/state` returns `revision`
+  - `POST /api/state` requires matching `revision`
+  - On mismatch, server returns `409` with latest snapshot
 
-1. 交易日历增强  
-接入 A 股/港股/美股交易日历与节假日服务，提升闭市判断准确性。
+## API Overview
 
-2. 多资产类型  
-支持 ETF、指数、期货、加密资产等卡片类型，统一在同一面板管理。
+- `GET /api/quote?symbol=...`
+- `GET /api/stock/search?q=...&limit=...`
+- `GET /api/stock/history?symbol=...&days=...`
+- `GET /api/hn/top?limit=...`
+- `GET /api/quote/snippet?topic=...&count=...`
+- `GET /api/state`
+- `POST /api/state`
 
-3. 组合与仓位维度  
-增加持仓数量、建仓批次、加减仓记录，输出绝对盈亏与组合贡献。
+## Known Limitations
 
-4. 提醒与预警引擎  
-加入价格、涨跌幅、成交量异动、均线突破等规则告警（页面+Webhook）。
+- Market open/close logic is session-based; exchange holiday calendars are not integrated yet.
+- Intraday volume chart is refresh-delta based (not tick-level).
+- Single-user local deployment model; no auth/tenant isolation yet.
 
-5. 更强图表能力  
-扩展 K 线、均线、成交量叠加、区间统计、指标面板（MACD/RSI 等）。
+## Roadmap (Suggested)
 
-6. 数据源管理  
-数据源健康检查、自动降级、质量评分、请求重试与缓存策略可配置。
+- Exchange holiday calendar integration (CN/HK/US)
+- Multi-asset support (ETF/index/futures/crypto)
+- Portfolio-level position and contribution tracking
+- More advanced chart overlays and factor views
+- Webhook/notification channel extensions
+- Stronger E2E coverage and release automation
 
-7. 云端同步与多端访问  
-把状态存储迁移到数据库，支持账号体系与多设备实时同步。
+## Contributing
 
-8. 权限系统升级  
-从单卡片权限扩展到角色/团队级权限模型，支持共享看板与审计日志。
+Issues and PRs are welcome.
 
-9. 回测与复盘联动  
-将卡片行情与策略信号关联，支持历史回放、策略对比和复盘导出。
+Recommended workflow:
 
-10. 工程化与测试  
-补充单元测试与 E2E，加入 CI/CD、发布版本管理与错误监控。
+1. Fork or create a feature branch from `main`
+2. Keep changes focused and include tests where possible
+3. Run `npm run check` and `npm test`
+4. Open a PR with clear scope and validation notes
+
+## Security / Runtime Notes
+
+- `.dashboard-state.json` is runtime data and should not be committed.
+- Do not store secrets in frontend code or committed config.
+
+## License
+
+No explicit license file is included yet.
+If you plan to distribute this as a public open-source project, add a license file (for example, MIT) before wider reuse.
