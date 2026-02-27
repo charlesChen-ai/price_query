@@ -5,6 +5,77 @@ const path = require("path");
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 8000);
 const STATE_FILE = path.join(ROOT, ".dashboard-state.json");
+const HN_TOP_STORIES_URL = "https://hacker-news.firebaseio.com/v0/topstories.json";
+const EASTMONEY_SEARCH_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8";
+const QUOTE_TOPICS = new Set(["mixed", "economics", "philosophy", "engineering"]);
+const QUOTE_LIBRARY = {
+  economics: [
+    {
+      text: "价格不是数字本身，而是无数决策在特定时刻达成的妥协。市场越复杂，单点解释就越危险。",
+      author: "Signal Notebook",
+      source: "Economics Fragment",
+    },
+    {
+      text: "大多数人高估短期波动的意义，却低估长期复利的力量。耐心本身也是一种稀缺资产。",
+      author: "Signal Notebook",
+      source: "Economics Fragment",
+    },
+    {
+      text: "风险从来不是回撤之后才出现的，它在仓位形成的那一刻就已经存在。",
+      author: "Signal Notebook",
+      source: "Economics Fragment",
+    },
+    {
+      text: "宏观叙事决定方向感，微观结构决定执行质量。两者缺一，判断就会失真。",
+      author: "Signal Notebook",
+      source: "Economics Fragment",
+    },
+  ],
+  philosophy: [
+    {
+      text: "清晰不来自更多信息，而来自更少但更关键的问题。先问什么是必须知道的，再问剩下的。",
+      author: "Signal Notebook",
+      source: "Philosophy Fragment",
+    },
+    {
+      text: "你无法控制结果，但可以设计过程。过程稳定，结果才有可讨论性。",
+      author: "Signal Notebook",
+      source: "Philosophy Fragment",
+    },
+    {
+      text: "错误并不可怕，可怕的是用更复杂的解释去掩盖简单的错误。",
+      author: "Signal Notebook",
+      source: "Philosophy Fragment",
+    },
+    {
+      text: "认知的边界往往不是知识不足，而是我们不愿意承认自己正在猜测。",
+      author: "Signal Notebook",
+      source: "Philosophy Fragment",
+    },
+  ],
+  engineering: [
+    {
+      text: "系统稳定不是因为没有故障，而是因为故障发生时仍有可预期的退化路径。",
+      author: "Signal Notebook",
+      source: "Engineering Fragment",
+    },
+    {
+      text: "工程中的“快”不是省略步骤，而是持续减少返工。一次性跑通，通常比反复修补更快。",
+      author: "Signal Notebook",
+      source: "Engineering Fragment",
+    },
+    {
+      text: "可观测性不是锦上添花，它是系统在压力下保持可控的前提条件。",
+      author: "Signal Notebook",
+      source: "Engineering Fragment",
+    },
+    {
+      text: "好的抽象会隐藏复杂度，坏的抽象会隐藏问题。两者表面都很干净，结果完全不同。",
+      author: "Signal Notebook",
+      source: "Engineering Fragment",
+    },
+  ],
+};
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -19,6 +90,21 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/quote") {
       await handleQuote(url, res);
+      return;
+    }
+
+    if (url.pathname === "/api/quote/snippet") {
+      await handleQuoteSnippet(url, res);
+      return;
+    }
+
+    if (url.pathname === "/api/stock/search") {
+      await handleStockSearch(url, res);
+      return;
+    }
+
+    if (url.pathname === "/api/hn/top") {
+      await handleHnTop(url, res);
       return;
     }
 
@@ -104,6 +190,83 @@ async function handleState(req, res) {
   }
 
   sendJson(res, 405, { error: "Method Not Allowed" });
+}
+
+async function handleQuoteSnippet(url, res) {
+  const topic = parseQuoteTopic(url.searchParams.get("topic"));
+  const count = clampQuoteCount(url.searchParams.get("count"));
+
+  const pool =
+    topic === "mixed"
+      ? [...QUOTE_LIBRARY.economics, ...QUOTE_LIBRARY.philosophy, ...QUOTE_LIBRARY.engineering]
+      : QUOTE_LIBRARY[topic];
+
+  const items = sampleQuoteItems(pool, count).map((item) => ({
+    ...item,
+    topic: topic === "mixed" ? inferQuoteTopic(item.source) : topic,
+    timestamp: Date.now(),
+  }));
+
+  sendJson(res, 200, {
+    topic,
+    items,
+  });
+}
+
+async function handleStockSearch(url, res) {
+  const query = (url.searchParams.get("q") || "").trim();
+  const limit = clampStockSearchLimit(url.searchParams.get("limit"));
+  if (!query) {
+    sendJson(res, 200, { items: [] });
+    return;
+  }
+
+  const params = new URLSearchParams({
+    input: query,
+    type: "14",
+    token: EASTMONEY_SEARCH_TOKEN,
+    count: String(limit),
+  });
+
+  try {
+    const endpoint = `https://searchapi.eastmoney.com/api/suggest/get?${params.toString()}`;
+    const payload = await fetchJson(endpoint);
+    const rows = Array.isArray(payload?.QuotationCodeTable?.Data)
+      ? payload.QuotationCodeTable.Data
+      : [];
+
+    const items = rows.map(normalizeStockSearchItem).filter(Boolean);
+    sendJson(res, 200, { items });
+  } catch {
+    sendJson(res, 200, { items: [] });
+  }
+}
+
+async function handleHnTop(url, res) {
+  const limit = clampHnLimit(url.searchParams.get("limit"));
+  const topIds = await fetchJson(HN_TOP_STORIES_URL);
+
+  if (!Array.isArray(topIds) || !topIds.length) {
+    sendJson(res, 502, { error: "Hacker News 热门列表为空" });
+    return;
+  }
+
+  const ids = topIds.slice(0, limit);
+  const items = await Promise.all(
+    ids.map(async (id) => {
+      try {
+        const item = await fetchJson(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
+        return normalizeHnItem(item);
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  sendJson(res, 200, {
+    items: items.filter(Boolean),
+    source: "hacker-news",
+  });
 }
 
 async function handleStatic(pathname, res) {
@@ -239,6 +402,14 @@ async function fetchYahooQuote(symbol) {
   };
 }
 
+async function fetchJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
 function parseCnSymbol(input) {
   const raw = input.trim().toUpperCase();
 
@@ -311,6 +482,102 @@ function parseTencentTime(value) {
   }
 
   return new Date(y, m - 1, d, hh, mm, ss).getTime();
+}
+
+function clampStockSearchLimit(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return 8;
+  return Math.min(20, Math.max(3, Math.round(num)));
+}
+
+function normalizeStockSearchItem(item) {
+  if (!item) return null;
+
+  const code = String(item.Code || item.SecurityCode || "").trim();
+  const name = String(item.Name || item.ShortName || "").trim();
+  if (!code || !name) return null;
+
+  const marketNum = String(item.MktNum || "").trim();
+  const securityTypeName = String(item.SecurityTypeName || "").trim();
+
+  let querySymbol = "";
+  if (marketNum === "1") {
+    querySymbol = `${code}.SS`;
+  } else if (marketNum === "0") {
+    querySymbol = `${code}.SZ`;
+  } else if (/港/i.test(securityTypeName) && /^\d{4,5}$/.test(code)) {
+    querySymbol = `${code.padStart(4, "0")}.HK`;
+  } else {
+    querySymbol = toYahooSymbol(code);
+  }
+
+  return {
+    code,
+    name,
+    querySymbol,
+    marketNum,
+    securityTypeName,
+  };
+}
+
+function clampHnLimit(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return 8;
+  return Math.min(20, Math.max(3, Math.round(num)));
+}
+
+function normalizeHnItem(item) {
+  if (!item || item.deleted || item.dead || !item.id || !item.title) return null;
+  const fallbackUrl = `https://news.ycombinator.com/item?id=${item.id}`;
+  return {
+    id: item.id,
+    title: String(item.title),
+    url: item.url || fallbackUrl,
+    by: item.by || "unknown",
+    score: Number.isFinite(item.score) ? item.score : 0,
+    descendants: Number.isFinite(item.descendants) ? item.descendants : 0,
+    time: Number.isFinite(item.time) ? item.time * 1000 : Date.now(),
+    domain: extractDomain(item.url),
+  };
+}
+
+function parseQuoteTopic(raw) {
+  const normalized = String(raw || "").trim().toLowerCase();
+  if (QUOTE_TOPICS.has(normalized)) return normalized;
+  return "mixed";
+}
+
+function clampQuoteCount(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return 1;
+  return Math.min(3, Math.max(1, Math.round(num)));
+}
+
+function sampleQuoteItems(pool, count) {
+  if (!Array.isArray(pool) || !pool.length) return [];
+  const copied = [...pool];
+  for (let i = copied.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copied[i], copied[j]] = [copied[j], copied[i]];
+  }
+  return copied.slice(0, count);
+}
+
+function inferQuoteTopic(source) {
+  const text = String(source || "").toLowerCase();
+  if (text.includes("economics")) return "economics";
+  if (text.includes("philosophy")) return "philosophy";
+  if (text.includes("engineering")) return "engineering";
+  return "mixed";
+}
+
+function extractDomain(url) {
+  if (!url) return "news.ycombinator.com";
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "news.ycombinator.com";
+  }
 }
 
 async function readStateFile() {
