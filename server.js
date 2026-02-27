@@ -7,7 +7,9 @@ const PORT = Number(process.env.PORT || 8000);
 const STATE_FILE = path.join(ROOT, ".dashboard-state.json");
 const HN_TOP_STORIES_URL = "https://hacker-news.firebaseio.com/v0/topstories.json";
 const EASTMONEY_SEARCH_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8";
+const EASTMONEY_HISTORY_TOKEN = "fa5fd1943c7b386f172d6893dbfba10b";
 const QUOTE_TOPICS = new Set(["mixed", "economics", "philosophy", "engineering"]);
+const ALERT_HISTORY_LIMIT = 200;
 const QUOTE_LIBRARY = {
   economics: [
     {
@@ -82,6 +84,9 @@ const MIME = {
   ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".png": "image/png",
 };
 
 const server = http.createServer(async (req, res) => {
@@ -100,6 +105,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/stock/search") {
       await handleStockSearch(url, res);
+      return;
+    }
+
+    if (url.pathname === "/api/stock/history") {
+      await handleStockHistory(url, res);
       return;
     }
 
@@ -181,8 +191,13 @@ async function handleState(req, res) {
       return;
     }
 
+    const currentState = await readStateFile();
+    const normalizedAlerts = Object.prototype.hasOwnProperty.call(payload, "alerts")
+      ? normalizeAlertState(payload.alerts)
+      : normalizeAlertState(currentState.alerts);
     await writeStateFile({
       cards: payload.cards,
+      alerts: normalizedAlerts,
       updatedAt: Date.now(),
     });
     sendJson(res, 200, { ok: true });
@@ -239,6 +254,35 @@ async function handleStockSearch(url, res) {
     sendJson(res, 200, { items });
   } catch {
     sendJson(res, 200, { items: [] });
+  }
+}
+
+async function handleStockHistory(url, res) {
+  const input = (url.searchParams.get("symbol") || "").trim();
+  const days = clampStockHistoryDays(url.searchParams.get("days"));
+  if (!input) {
+    sendJson(res, 400, { error: "缺少 symbol 参数" });
+    return;
+  }
+
+  const local = parseCnSymbol(input);
+  if (local) {
+    try {
+      const payload = await fetchEastMoneyHistory(local, days);
+      sendJson(res, 200, payload);
+      return;
+    } catch {
+      // Fall through to Yahoo fallback.
+    }
+  }
+
+  try {
+    const payload = await fetchYahooHistory(toYahooSymbol(input), days);
+    sendJson(res, 200, payload);
+  } catch (error) {
+    sendJson(res, 502, {
+      error: `无法获取 ${input} 历史行情：${normalizeError(error)}`,
+    });
   }
 }
 
@@ -319,6 +363,7 @@ async function fetchEastMoneyQuote(local) {
     symbol: `${local.code}.${local.market === "SH" ? "SS" : "SZ"}`,
     name: data.f58 || `${local.market}${local.code}`,
     price,
+    prevClose,
     change,
     changePercent,
     high: scalePrice(data.f44),
@@ -363,6 +408,7 @@ async function fetchTencentQuote(local) {
     symbol: `${local.code}.${local.market === "SH" ? "SS" : "SZ"}`,
     name: parts[1] || `${local.market}${local.code}`,
     price,
+    prevClose,
     change,
     changePercent,
     high: numberOrNull(parts[33]),
@@ -391,6 +437,7 @@ async function fetchYahooQuote(symbol) {
     symbol: quote.symbol,
     name: quote.shortName || quote.longName || symbol,
     price: quote.regularMarketPrice,
+    prevClose: quote.regularMarketPreviousClose,
     change: quote.regularMarketChange,
     changePercent: quote.regularMarketChangePercent,
     high: quote.regularMarketDayHigh,
@@ -399,6 +446,100 @@ async function fetchYahooQuote(symbol) {
     currency: quote.currency || "",
     timestamp: quote.regularMarketTime ? quote.regularMarketTime * 1000 : Date.now(),
     source: "yahoo",
+  };
+}
+
+async function fetchEastMoneyHistory(local, limit) {
+  const secid = `${local.market === "SH" ? "1" : "0"}.${local.code}`;
+  const params = new URLSearchParams({
+    secid,
+    ut: EASTMONEY_HISTORY_TOKEN,
+    fields1: "f1,f2,f3,f4,f5,f6",
+    fields2: "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+    klt: "101",
+    fqt: "1",
+    beg: "0",
+    end: "20500101",
+    lmt: String(limit),
+  });
+  const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?${params.toString()}`;
+
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`EastMoney History HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const data = payload?.data;
+  const rows = Array.isArray(data?.klines) ? data.klines : [];
+  const items = rows.map(parseEastMoneyKline).filter(Boolean);
+  if (!items.length) {
+    throw new Error("EastMoney 历史数据为空");
+  }
+
+  return {
+    symbol: `${local.code}.${local.market === "SH" ? "SS" : "SZ"}`,
+    name: data?.name || `${local.market}${local.code}`,
+    interval: "1d",
+    source: "eastmoney",
+    items,
+  };
+}
+
+async function fetchYahooHistory(symbol, limit) {
+  const end = Math.floor(Date.now() / 1000);
+  const start = end - resolveHistoryWindowSeconds(limit);
+  const params = new URLSearchParams({
+    interval: "1d",
+    includePrePost: "false",
+    events: "div,splits",
+    period1: String(start),
+    period2: String(end),
+  });
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?${params.toString()}`;
+
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Yahoo History HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const result = payload?.chart?.result?.[0];
+  const quote = result?.indicators?.quote?.[0];
+  const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
+  const closes = Array.isArray(quote?.close) ? quote.close : [];
+  const opens = Array.isArray(quote?.open) ? quote.open : [];
+  const highs = Array.isArray(quote?.high) ? quote.high : [];
+  const lows = Array.isArray(quote?.low) ? quote.low : [];
+  const volumes = Array.isArray(quote?.volume) ? quote.volume : [];
+
+  const items = timestamps
+    .map((ts, index) => {
+      const close = numberOrNull(closes[index]);
+      if (!Number.isFinite(close)) return null;
+
+      return {
+        date: new Date(Number(ts) * 1000).toISOString().slice(0, 10),
+        open: numberOrNull(opens[index]),
+        close,
+        high: numberOrNull(highs[index]),
+        low: numberOrNull(lows[index]),
+        volume: numberOrNull(volumes[index]),
+      };
+    })
+    .filter(Boolean)
+    .slice(-limit);
+
+  if (!items.length) {
+    throw new Error("Yahoo 历史数据为空");
+  }
+
+  return {
+    symbol,
+    name: result?.meta?.symbol || symbol,
+    interval: "1d",
+    source: "yahoo",
+    items,
   };
 }
 
@@ -484,10 +625,35 @@ function parseTencentTime(value) {
   return new Date(y, m - 1, d, hh, mm, ss).getTime();
 }
 
+function clampStockHistoryDays(raw) {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return 160;
+  return Math.min(260, Math.max(30, Math.round(num)));
+}
+
 function clampStockSearchLimit(raw) {
   const num = Number(raw);
   if (!Number.isFinite(num)) return 8;
   return Math.min(20, Math.max(3, Math.round(num)));
+}
+
+function parseEastMoneyKline(row) {
+  if (typeof row !== "string") return null;
+  const parts = row.split(",");
+  if (parts.length < 6) return null;
+
+  const [date, open, close, high, low, volume] = parts;
+  const normalizedClose = numberOrNull(close);
+  if (!date || !Number.isFinite(normalizedClose)) return null;
+
+  return {
+    date,
+    open: numberOrNull(open),
+    close: normalizedClose,
+    high: numberOrNull(high),
+    low: numberOrNull(low),
+    volume: numberOrNull(volume),
+  };
 }
 
 function normalizeStockSearchItem(item) {
@@ -518,6 +684,11 @@ function normalizeStockSearchItem(item) {
     marketNum,
     securityTypeName,
   };
+}
+
+function resolveHistoryWindowSeconds(limit) {
+  const tradingDays = Math.max(30, Number(limit) || 160);
+  return tradingDays * 24 * 60 * 60 * 3;
 }
 
 function clampHnLimit(raw) {
@@ -585,15 +756,53 @@ async function readStateFile() {
     const raw = await fs.readFile(STATE_FILE, "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || !Array.isArray(parsed.cards)) {
-      return { cards: [] };
+      return { cards: [], alerts: normalizeAlertState(null) };
     }
-    return parsed;
+    return {
+      ...parsed,
+      cards: parsed.cards,
+      alerts: normalizeAlertState(parsed.alerts),
+    };
   } catch (error) {
     if (error && error.code === "ENOENT") {
-      return { cards: [] };
+      return { cards: [], alerts: normalizeAlertState(null) };
     }
     throw error;
   }
+}
+
+function normalizeAlertState(alerts) {
+  const fallback = {
+    enabled: true,
+    silentMode: true,
+    lowPowerMode: false,
+    soundEnabled: false,
+    vibrationEnabled: false,
+    panelCollapsed: false,
+    rules: [],
+    history: [],
+    totalTriggered: 0,
+  };
+
+  if (!alerts || typeof alerts !== "object") {
+    return fallback;
+  }
+
+  return {
+    ...fallback,
+    ...alerts,
+    enabled: typeof alerts.enabled === "boolean" ? alerts.enabled : fallback.enabled,
+    silentMode: typeof alerts.silentMode === "boolean" ? alerts.silentMode : fallback.silentMode,
+    lowPowerMode: typeof alerts.lowPowerMode === "boolean" ? alerts.lowPowerMode : fallback.lowPowerMode,
+    soundEnabled: typeof alerts.soundEnabled === "boolean" ? alerts.soundEnabled : fallback.soundEnabled,
+    vibrationEnabled: typeof alerts.vibrationEnabled === "boolean" ? alerts.vibrationEnabled : fallback.vibrationEnabled,
+    panelCollapsed: typeof alerts.panelCollapsed === "boolean" ? alerts.panelCollapsed : fallback.panelCollapsed,
+    totalTriggered: Number.isFinite(Number(alerts.totalTriggered))
+      ? Math.max(0, Number(alerts.totalTriggered))
+      : fallback.totalTriggered,
+    rules: Array.isArray(alerts.rules) ? alerts.rules : [],
+    history: Array.isArray(alerts.history) ? alerts.history.slice(-ALERT_HISTORY_LIMIT) : [],
+  };
 }
 
 async function writeStateFile(payload) {

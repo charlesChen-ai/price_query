@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Historical Analysis</title>
+    <meta name="theme-color" content="#f3f4f6" />
+    <meta name="description" content="A low-profile historical analysis and playback workspace." />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="analysis-page">
+    <div class="bg-orb orb-left"></div>
+    <div class="bg-orb orb-right"></div>
+
+    <header class="topbar analysis-topbar">
+      <div>
+        <p class="eyebrow">Historical Analysis</p>
+        <h1>历史分析</h1>
+      </div>
+      <div class="topbar-actions">
+        <a href="./index.html" class="btn btn-ghost">总览</a>
+        <button id="loadAnalysisBtn" type="submit" form="analysisControls" class="btn btn-primary">加载</button>
+      </div>
+    </header>
+
+    <main class="analysis-shell">
+      <section class="analysis-panel analysis-controls-panel">
+        <form id="analysisControls" class="analysis-controls">
+          <label class="analysis-field analysis-symbol-field">
+            <span>股票</span>
+            <input
+              id="analysisSymbolInput"
+              type="text"
+              list="analysisStockSuggestList"
+              autocomplete="off"
+              placeholder="如 贵州茅台 / 600519 / AAPL"
+              required
+            />
+          </label>
+          <datalist id="analysisStockSuggestList"></datalist>
+
+          <label class="analysis-field">
+            <span>区间</span>
+            <select id="analysisPreset">
+              <option value="3m">近 3 个月</option>
+              <option value="6m" selected>近 6 个月</option>
+              <option value="1y">近 1 年</option>
+              <option value="max">全部样本</option>
+              <option value="custom">自定义</option>
+            </select>
+          </label>
+
+          <label class="analysis-field">
+            <span>开始</span>
+            <input id="analysisStartDate" type="date" />
+          </label>
+
+          <label class="analysis-field">
+            <span>结束</span>
+            <input id="analysisEndDate" type="date" />
+          </label>
+        </form>
+        <p id="analysisStatus" class="analysis-status">等待加载历史数据。</p>
+      </section>
+
+      <section class="analysis-main-grid">
+        <div class="analysis-main-stack">
+          <section class="analysis-panel">
+            <div class="analysis-panel-head">
+              <div>
+                <p class="eyebrow">Range Snapshot</p>
+                <h2>区间视图</h2>
+              </div>
+              <div id="analysisLegend" class="analysis-legend"></div>
+            </div>
+            <div id="analysisOverview" class="analysis-overview"></div>
+            <div id="analysisChart" class="analysis-chart-empty">加载后展示区间价格、均线和策略信号。</div>
+          </section>
+
+          <section class="analysis-panel">
+            <div class="analysis-panel-head">
+              <div>
+                <p class="eyebrow">Playback</p>
+                <h2>区间回放</h2>
+              </div>
+            </div>
+            <div class="analysis-timeline">
+              <input id="analysisTimeline" type="range" min="0" max="0" value="0" step="1" disabled />
+              <div class="analysis-timeline-meta">
+                <span id="analysisTimelineLabel">尚未选择时间点</span>
+                <span id="analysisTimelineCount">0 / 0</span>
+              </div>
+            </div>
+            <div class="analysis-playback-controls">
+              <button id="analysisPrevBtn" type="button" class="btn btn-ghost" disabled>前一帧</button>
+              <button id="analysisPlayBtn" type="button" class="btn btn-primary" disabled>播放</button>
+              <button id="analysisNextBtn" type="button" class="btn btn-ghost" disabled>后一帧</button>
+              <label class="analysis-inline-field">
+                <span>步长</span>
+                <select id="analysisPlaybackStep">
+                  <option value="day" selected>逐日</option>
+                  <option value="week">逐周</option>
+                </select>
+              </label>
+            </div>
+          </section>
+        </div>
+
+        <aside class="analysis-side-stack">
+          <section class="analysis-panel">
+            <div class="analysis-panel-head">
+              <div>
+                <p class="eyebrow">Technicals</p>
+                <h2>技术状态</h2>
+              </div>
+            </div>
+            <div id="analysisSnapshot" class="analysis-snapshot-empty">选择时间点后展示当时指标状态。</div>
+          </section>
+
+          <section class="analysis-panel">
+            <div class="analysis-panel-head">
+              <div>
+                <p class="eyebrow">Strategy</p>
+                <h2>策略回测</h2>
+              </div>
+            </div>
+            <form id="analysisStrategyForm" class="analysis-strategy-form">
+              <label class="analysis-field">
+                <span>策略类型</span>
+                <select id="analysisStrategyType"></select>
+              </label>
+              <div id="analysisStrategyParams" class="analysis-strategy-params"></div>
+              <div class="analysis-config-group">
+                <p class="analysis-config-title">回测执行参数</p>
+                <div id="analysisExecutionParams" class="analysis-strategy-params"></div>
+              </div>
+              <div class="analysis-strategy-actions">
+                <button id="analysisApplyStrategyBtn" type="submit" class="btn btn-primary">应用策略</button>
+                <button id="analysisResetStrategyBtn" type="button" class="btn btn-ghost">恢复默认</button>
+              </div>
+            </form>
+            <p id="analysisStrategyHint" class="analysis-strategy-hint"></p>
+            <div id="analysisBacktest" class="analysis-backtest-empty">加载后生成买卖信号与回测统计。</div>
+          </section>
+
+          <section class="analysis-panel">
+            <div class="analysis-panel-head">
+              <div>
+                <p class="eyebrow">Export</p>
+                <h2>CSV 导出</h2>
+              </div>
+            </div>
+            <div class="analysis-export-actions">
+              <button class="btn btn-ghost" type="button" data-export-type="history" disabled>历史数据</button>
+              <button class="btn btn-ghost" type="button" data-export-type="technicals" disabled>技术指标</button>
+              <button class="btn btn-ghost" type="button" data-export-type="backtest" disabled>回测结果</button>
+            </div>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script src="./analysis.js"></script>
+  </body>
+</html>

@@ -6,7 +6,8 @@
     <title>Workspace Overview</title>
     <meta name="theme-color" content="#f3f4f6" />
     <meta name="description" content="A low-profile workspace dashboard for monitoring personal signals and reading queues." />
-    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2" sizes="any" />
+    <link rel="shortcut icon" href="/favicon.svg?v=2" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -20,11 +21,15 @@
     <div class="bg-orb orb-right"></div>
 
     <header class="topbar">
-      <div>
+      <div class="topbar-brand">
+        <img src="/favicon.svg?v=2" alt="Workspace Icon" class="brand-icon" />
         <p class="eyebrow">Workspace Overview</p>
         <h1>工作总览</h1>
       </div>
-      <button id="createCardBtn" class="btn btn-primary">新建</button>
+      <div class="topbar-actions">
+        <a href="./analysis.html" class="btn btn-ghost">分析</a>
+        <button id="createCardBtn" class="btn btn-primary">新建</button>
+      </div>
     </header>
 
     <main>
@@ -36,6 +41,89 @@
         <span>卡片总数 <strong id="cardCount">0</strong></span>
         <span>自动刷新中 <strong id="autoRefreshCount">0</strong></span>
       </p>
+
+      <section id="alertWorkbench" class="alert-workbench">
+        <header class="alert-workbench-head">
+          <div>
+            <p class="eyebrow">Work Notification</p>
+            <h2>工作通知中心</h2>
+          </div>
+          <button type="button" id="alertCollapseBtn" class="btn btn-ghost">收起</button>
+        </header>
+
+        <div id="alertWorkbenchBody" class="alert-workbench-body">
+          <section class="alert-switch-grid">
+            <label><input id="alertCenterToggle" type="checkbox" checked /> 启用预警引擎</label>
+            <label><input id="alertSilentToggle" type="checkbox" checked /> 静默通知</label>
+            <label><input id="alertSoundToggle" type="checkbox" /> 声音提醒</label>
+            <label><input id="alertVibrationToggle" type="checkbox" /> 震动提醒</label>
+            <label><input id="alertLowPowerToggle" type="checkbox" /> 低功耗监控</label>
+          </section>
+
+          <section class="alert-stats-grid">
+            <article class="alert-stat">
+              <span class="label">规则总数</span>
+              <strong id="alertRuleCount">0</strong>
+            </article>
+            <article class="alert-stat">
+              <span class="label">启用规则</span>
+              <strong id="alertEnabledRuleCount">0</strong>
+            </article>
+            <article class="alert-stat">
+              <span class="label">今日触发</span>
+              <strong id="alertTodayCount">0</strong>
+            </article>
+            <article class="alert-stat">
+              <span class="label">累计触发</span>
+              <strong id="alertTotalCount">0</strong>
+            </article>
+          </section>
+
+          <form id="alertRuleForm" class="alert-rule-form">
+            <label class="alert-field">
+              <span>标的</span>
+              <select id="alertRuleCardSelect"></select>
+            </label>
+            <label class="alert-field">
+              <span>规则类型</span>
+              <select id="alertRuleTypeSelect">
+                <option value="price" selected>价格阈值</option>
+                <option value="change">涨跌幅监控</option>
+                <option value="ma_breakout">MA 突破检测</option>
+                <option value="macd_cross">MACD 金叉/死叉</option>
+                <option value="rsi_zone">RSI 超买超卖</option>
+              </select>
+            </label>
+            <div id="alertRuleParams" class="alert-rule-params"></div>
+            <label class="alert-field">
+              <span>冷却时间</span>
+              <select id="alertRuleCooldownSelect">
+                <option value="60000">1 分钟</option>
+                <option value="180000">3 分钟</option>
+                <option value="300000" selected>5 分钟</option>
+                <option value="900000">15 分钟</option>
+                <option value="1800000">30 分钟</option>
+              </select>
+            </label>
+            <button type="submit" class="btn btn-primary">新增规则</button>
+          </form>
+
+          <div class="alert-toolbar">
+            <button type="button" id="alertToggleAllRulesBtn" class="btn btn-ghost">一键启用/禁用</button>
+            <button type="button" id="alertClearHistoryBtn" class="btn btn-ghost">清空历史</button>
+          </div>
+
+          <section class="alert-panel-block">
+            <h3>规则列表</h3>
+            <div id="alertRuleList" class="alert-rule-list"></div>
+          </section>
+
+          <section class="alert-panel-block">
+            <h3>历史通知</h3>
+            <div id="alertHistoryList" class="alert-history-list"></div>
+          </section>
+        </div>
+      </section>
     </main>
 
     <dialog id="createDialog" class="modal">

@@ -12,9 +12,18 @@
   - 分时量柱状图（基于每次刷新的成交量增量）
 - 成本价与盈亏：支持 4 位小数成本价，自动计算盈亏比例
 - 闭市暂停：交易时段外自动停止拉取，开市后自动恢复
+- 预警引擎：
+  - 规则类型：价格阈值、单日涨跌幅、MA 突破、MACD 金叉死叉、RSI 超买超卖
+  - 触发机制：基于实时刷新结果和技术指标变化检测，支持规则冷却时间去重
+  - 通知方式：工作通知流（静默）、可选声音/震动、低功耗监控模式
+  - 管理能力：规则列表、历史记录、触发统计、一键启用/禁用
 - 持久化：
   - 浏览器 `localStorage` 兜底
   - 服务端 `.dashboard-state.json` 持久化
+- 历史分析与策略回测：
+  - 策略类型：MA 交叉、MACD、RSI、价格突破、组合策略
+  - 参数维度：周期（日/周/月）、仓位、止损止盈、手续费、滑点、持仓周期
+  - 结果面板：收益曲线（策略 vs 基准）、年化收益、最大回撤、夏普、盈亏比、交易明细
 
 ## 技术栈
 
@@ -52,6 +61,9 @@ http://127.0.0.1:8000
 ├── styles.css        # 样式与图表视觉
 ├── app.js            # 前端交互、行情刷新、权限逻辑、持久化
 ├── server.js         # 本地静态服务 + 行情代理 + 状态持久化接口
+├── docs/
+│   ├── alert-engine-architecture.md
+│   └── strategy-backtest-architecture.md
 └── .dashboard-state.json   # 卡片状态持久化文件
 ```
 
@@ -59,7 +71,8 @@ http://127.0.0.1:8000
 
 - 前端会在变更时同步写入：
   - `localStorage`（键：`stock_dashboard_cards_v1`）
-  - `POST /api/state`（落盘到 `.dashboard-state.json`）
+  - `localStorage`（键：`stock_dashboard_alert_engine_v1`）
+  - `POST /api/state`（落盘到 `.dashboard-state.json`，包含 cards + alerts）
 - 页面加载时优先读取 `GET /api/state`，远端为空时回退到本地数据。
 
 ## 当前限制
