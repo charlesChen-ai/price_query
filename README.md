@@ -13,13 +13,14 @@
 - 成本价与盈亏：支持 4 位小数成本价，自动计算盈亏比例
 - 闭市暂停：交易时段外自动停止拉取，开市后自动恢复
 - 预警引擎：
-  - 规则类型：价格阈值、单日涨跌幅、MA 突破、MACD 金叉死叉、RSI 超买超卖
+  - 规则类型：价格阈值、单日涨跌幅、MA 突破、MACD 金叉死叉、RSI 超买超卖、KDJ 金叉死叉/区间
   - 触发机制：基于实时刷新结果和技术指标变化检测，支持规则冷却时间去重
   - 通知方式：工作通知流（静默）、可选声音/震动、低功耗监控模式
   - 管理能力：规则列表、历史记录、触发统计、一键启用/禁用
 - 持久化：
   - 浏览器 `localStorage` 兜底
   - 服务端 `.dashboard-state.json` 持久化
+  - `revision` 冲突检测，避免多标签页互相覆盖状态
 - 历史分析与策略回测：
   - 策略类型：MA 交叉、MACD、RSI、价格突破、组合策略
   - 参数维度：周期（日/周/月）、仓位、止损止盈、手续费、滑点、持仓周期
@@ -72,8 +73,18 @@ http://127.0.0.1:8000
 - 前端会在变更时同步写入：
   - `localStorage`（键：`stock_dashboard_cards_v1`）
   - `localStorage`（键：`stock_dashboard_alert_engine_v1`）
-  - `POST /api/state`（落盘到 `.dashboard-state.json`，包含 cards + alerts）
+  - `POST /api/state`（落盘到 `.dashboard-state.json`，包含 cards + alerts + revision）
 - 页面加载时优先读取 `GET /api/state`，远端为空时回退到本地数据。
+- 发生并发写入冲突时，服务端返回 `409` 与最新快照，前端会自动合并并重试。
+
+## 开发验证
+
+```bash
+npm run check
+npm test
+```
+
+项目使用 Node 原生测试与 GitHub Actions CI（PR 自动执行语法检查与测试）。
 
 ## 当前限制
 

@@ -2,6 +2,9 @@ const ANALYSIS_HISTORY_DAYS = 260;
 const ANALYSIS_SEARCH_LIMIT = 10;
 const PLAYBACK_INTERVAL_MS = 720;
 const STRATEGY_STORAGE_KEY = "analysis_strategy_config_v1";
+const coreUtils = window.DashboardCore || {};
+const indicatorUtils = window.DashboardIndicatorCore || {};
+const signalPolicyUtils = window.DashboardSignalPolicyCore || {};
 const PRESET_BAR_COUNTS = {
   "3m": 60,
   "6m": 120,
@@ -103,6 +106,7 @@ const EXECUTION_CONFIG_FIELDS = [
   { key: "takeProfitPct", label: "止盈阈值(%)", type: "number", min: 0, max: 200, step: 0.5 },
   { key: "feeBps", label: "手续费(bp)", type: "number", min: 0, max: 100, step: 0.5 },
   { key: "slippageBps", label: "滑点(bp)", type: "number", min: 0, max: 100, step: 0.5 },
+  { key: "noSameBarReentry", label: "禁止同周期卖出后立即买回", type: "checkbox" },
 ];
 
 const ANNUALIZATION_FACTOR = {
@@ -892,9 +896,13 @@ function renderChart() {
   const currentX = mapX(analysisState.currentIndex).toFixed(2);
   const currentY = mapY(current.close).toFixed(2);
 
+  const signalMarkerOrder = new Map();
   const signalMarkers = analysisState.signals
     .map((signal) => {
-      const x = mapX(signal.index);
+      const key = `${signal.index}:${signal.type}`;
+      const sameSlotCount = signalMarkerOrder.get(key) || 0;
+      signalMarkerOrder.set(key, sameSlotCount + 1);
+      const x = mapX(signal.index) + sameSlotCount * 6 - 3;
       const y = mapY(signal.price);
       const points =
         signal.type === "buy"
@@ -905,7 +913,9 @@ function renderChart() {
               2
             )},${(y - 4).toFixed(2)}`;
       return `<polygon class="analysis-signal-marker ${signal.type === "buy" ? "is-buy" : "is-sell"}" points="${points}">
-        <title>${escapeHtml(signal.label)} · ${escapeHtml(signal.date)} · ${escapeHtml(signal.reason)}</title>
+        <title>${escapeHtml(signal.label)} · ${escapeHtml(signal.sourceIndicator || "Strategy")} · ${escapeHtml(
+          signal.date
+        )} · ${escapeHtml(signal.reason)}</title>
       </polygon>`;
     })
     .join("");
@@ -985,15 +995,29 @@ function renderSnapshot() {
     return;
   }
 
-  const signal = analysisState.signals.find((item) => item.index === analysisState.currentIndex) || null;
+  const currentSignals = analysisState.signals.filter((item) => item.index === analysisState.currentIndex);
+  const signalBadges = currentSignals
+    .map((signal) => {
+      const tone = signal.type === "buy" ? "is-positive" : "is-negative";
+      const source = signal.sourceIndicator ? `(${signal.sourceIndicator})` : "";
+      return buildAnalysisBadge(`${signal.label}${source}`, tone);
+    })
+    .join("");
   const tags = [
     buildAnalysisBadge(indicator.bias, toneForBias(indicator.bias)),
     buildAnalysisBadge(indicator.macdSignal, toneForMacd(indicator.macdSignal)),
     buildAnalysisBadge(indicator.rsiSignal, toneForRsi(indicator.rsiSignal)),
-    signal ? buildAnalysisBadge(signal.label, signal.type === "buy" ? "is-positive" : "is-negative") : "",
+    signalBadges,
   ]
     .filter(Boolean)
     .join("");
+
+  const signalHints = currentSignals.length
+    ? currentSignals.map((signal) => {
+        const source = signal.sourceIndicator ? `[${signal.sourceIndicator}] ` : "";
+        return `${source}${signal.reason}`;
+      })
+    : [];
 
   analysisRefs.snapshot.className = "analysis-snapshot";
   analysisRefs.snapshot.innerHTML = `<div class="analysis-snapshot-head">
@@ -1017,7 +1041,9 @@ function renderSnapshot() {
     ${analysisMetricTile("当日高低", `${formatNumber(current.high)} / ${formatNumber(current.low)}`)}
     ${analysisMetricTile("成交量", formatCompact(current.volume))}
   </div>
-  <p class="analysis-snapshot-note">${escapeHtml(signal?.reason || "当前时点无新增策略信号。")}</p>`;
+  <p class="analysis-snapshot-note">${escapeHtml(
+    signalHints.length ? signalHints.join("；") : "当前时点无新增策略信号。"
+  )}</p>`;
 }
 
 function renderBacktest() {
@@ -1078,7 +1104,9 @@ function renderBacktest() {
   <div class="analysis-snapshot-grid">${summary}</div>
   <p class="analysis-snapshot-note">${escapeHtml(
     stats.lastSignal
-      ? `最新信号：${stats.lastSignal.date} ${stats.lastSignal.label}，${stats.lastSignal.reason}`
+      ? `最新信号：${stats.lastSignal.date} ${stats.lastSignal.label}${
+          stats.lastSignal.sourceIndicator ? `(${stats.lastSignal.sourceIndicator})` : ""
+        }，${stats.lastSignal.reason}`
       : "当前区间未触发明确策略信号。"
   )}</p>
   <p class="analysis-snapshot-note">${escapeHtml(
@@ -1338,6 +1366,7 @@ async function runBacktest(bars, indicators, strategyConfigInput, onProgress) {
     if (position) inMarketBars += 1;
 
     let plannedExit = null;
+    let hadExitOnCurrentBar = false;
     if (position && Number.isFinite(position.entryRawPrice) && position.entryRawPrice > 0) {
       const grossReturnPct = ((point.close - position.entryRawPrice) / position.entryRawPrice) * 100;
       if (execution.stopLossPct > 0 && grossReturnPct <= -execution.stopLossPct) {
@@ -1396,11 +1425,28 @@ async function runBacktest(bars, indicators, strategyConfigInput, onProgress) {
         price: point.close,
         label: "卖出",
         reason: plannedExit.reason,
+        reasonCode: plannedExit.code,
+        sourceIndicator:
+          typeof signalPolicyUtils.signalSourceForStrategy === "function"
+            ? signalPolicyUtils.signalSourceForStrategy(strategyConfig.type, "sell", plannedExit.code)
+            : plannedExit.code === "signal"
+              ? "Strategy"
+              : "Risk",
       });
       position = null;
+      hadExitOnCurrentBar = true;
     }
 
-    if (!position && positionSize > 0 && shouldEnterStrategy(strategyConfig.type, previous, point, strategyConfig.params)) {
+    const allowSameBarEntry =
+      typeof signalPolicyUtils.shouldAllowSameBarEntry === "function"
+        ? signalPolicyUtils.shouldAllowSameBarEntry(execution, hadExitOnCurrentBar)
+        : !hadExitOnCurrentBar;
+    if (
+      !position &&
+      allowSameBarEntry &&
+      positionSize > 0 &&
+      shouldEnterStrategy(strategyConfig.type, previous, point, strategyConfig.params)
+    ) {
       const entryCapital = cash * positionSize;
       if (entryCapital > 0 && Number.isFinite(point.close) && point.close > 0) {
         const execPrice = point.close * (1 + slippageRate);
@@ -1425,6 +1471,11 @@ async function runBacktest(bars, indicators, strategyConfigInput, onProgress) {
             price: point.close,
             label: "买入",
             reason: buildStrategyEntryReason(strategyConfig.type, previous, point, strategyConfig.params),
+            reasonCode: "signal",
+            sourceIndicator:
+              typeof signalPolicyUtils.signalSourceForStrategy === "function"
+                ? signalPolicyUtils.signalSourceForStrategy(strategyConfig.type, "buy", "signal")
+                : "Strategy",
           });
         }
       }
@@ -1846,6 +1897,7 @@ function getDefaultExecutionConfig() {
     takeProfitPct: 18,
     feeBps: 6,
     slippageBps: 4,
+    noSameBarReentry: true,
   };
 }
 
@@ -1863,6 +1915,7 @@ function sanitizeExecutionConfig(rawInput) {
     takeProfitPct: clampNumber(raw.takeProfitPct, 0, 200, defaults.takeProfitPct),
     feeBps: clampNumber(raw.feeBps, 0, 100, defaults.feeBps),
     slippageBps: clampNumber(raw.slippageBps, 0, 100, defaults.slippageBps),
+    noSameBarReentry: raw.noSameBarReentry !== false,
   };
 }
 
@@ -1880,7 +1933,11 @@ function describeStrategyConfig(configInput) {
     execution.positionSizePct,
     0,
     0
-  )}% · 止损/止盈 ${formatNumber(execution.stopLossPct, 1, 1)}%/${formatNumber(execution.takeProfitPct, 1, 1)}%`;
+  )}% · 止损/止盈 ${formatNumber(execution.stopLossPct, 1, 1)}%/${formatNumber(
+    execution.takeProfitPct,
+    1,
+    1
+  )}% · ${execution.noSameBarReentry ? "禁同周期反手" : "允许同周期反手"}`;
 
   if (config.type === "ma_cross") {
     return `MA${params.fastPeriod} 上穿 MA${params.slowPeriod} 买入，下穿卖出 · ${executionSummary}`;
@@ -2034,17 +2091,17 @@ function downloadCsv(filename, content) {
 }
 
 function calculateSmaAt(values, index, period) {
-  if (index + 1 < period) return null;
-  const window = values.slice(index + 1 - period, index + 1);
-  const sum = window.reduce((acc, value) => acc + value, 0);
-  return sum / period;
+  if (typeof indicatorUtils.calculateSmaAt === "function") {
+    return indicatorUtils.calculateSmaAt(values, index, period);
+  }
+  return null;
 }
 
 function calculateSmaSeries(values, period) {
-  if (!Array.isArray(values) || !values.length || !Number.isFinite(period) || period < 1) {
-    return [];
+  if (typeof indicatorUtils.calculateSmaSeries === "function") {
+    return indicatorUtils.calculateSmaSeries(values, period);
   }
-  return values.map((_, index) => calculateSmaAt(values, index, period));
+  return [];
 }
 
 function calculateRollingExtremeSeries(values, period, mode, lookbackOffset = 1) {
@@ -2148,54 +2205,17 @@ function yieldToUi() {
 }
 
 function calculateEmaSeries(values, period) {
-  if (!Array.isArray(values) || !values.length) return [];
-  const multiplier = 2 / (period + 1);
-  let previous = Number(values[0]);
-  return values.map((value, index) => {
-    const current = Number(value);
-    if (!Number.isFinite(current)) return previous;
-    if (index === 0 || !Number.isFinite(previous)) {
-      previous = current;
-      return current;
-    }
-    previous = current * multiplier + previous * (1 - multiplier);
-    return previous;
-  });
+  if (typeof indicatorUtils.calculateEmaSeries === "function") {
+    return indicatorUtils.calculateEmaSeries(values, period);
+  }
+  return [];
 }
 
 function calculateRsiSeries(values, period) {
-  if (!Array.isArray(values) || !values.length) return [];
-
-  const series = new Array(values.length).fill(null);
-  if (values.length <= period) {
-    return series;
+  if (typeof indicatorUtils.calculateRsiSeries === "function") {
+    return indicatorUtils.calculateRsiSeries(values, period);
   }
-
-  let gains = 0;
-  let losses = 0;
-  for (let index = 1; index <= period; index += 1) {
-    const delta = values[index] - values[index - 1];
-    if (delta >= 0) {
-      gains += delta;
-    } else {
-      losses -= delta;
-    }
-  }
-
-  let avgGain = gains / period;
-  let avgLoss = losses / period;
-  series[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-
-  for (let index = period + 1; index < values.length; index += 1) {
-    const delta = values[index] - values[index - 1];
-    const gain = delta > 0 ? delta : 0;
-    const loss = delta < 0 ? -delta : 0;
-    avgGain = (avgGain * (period - 1) + gain) / period;
-    avgLoss = (avgLoss * (period - 1) + loss) / period;
-    series[index] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-  }
-
-  return series;
+  return [];
 }
 
 function normalizeHistoricalBar(item) {
@@ -2300,33 +2320,18 @@ function setAnalysisStatus(text) {
 }
 
 function numberOrNull(value) {
+  if (typeof coreUtils.numberOrNull === "function") {
+    return coreUtils.numberOrNull(value);
+  }
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
 }
 
 function toYahooSymbol(input) {
-  const raw = String(input || "").trim().toUpperCase();
-  if (/^\d{6}\.(SH|SS|SZ)$/.test(raw)) {
-    const [code, suffix] = raw.split(".");
-    return `${code}.${suffix === "SH" ? "SS" : suffix}`;
+  if (typeof coreUtils.toYahooSymbol === "function") {
+    return coreUtils.toYahooSymbol(input);
   }
-  if (/^(SH|SZ)\d{6}$/.test(raw)) {
-    return `${raw.slice(2)}.${raw.startsWith("SH") ? "SS" : "SZ"}`;
-  }
-  if (/^\d{6}$/.test(raw)) {
-    return `${raw}.${raw.startsWith("6") ? "SS" : "SZ"}`;
-  }
-  if (/^HK\d{4,5}$/.test(raw)) {
-    return `${raw.slice(2).padStart(4, "0")}.HK`;
-  }
-  if (/^\d{4,5}\.HK$/.test(raw)) {
-    const [code] = raw.split(".");
-    return `${code.padStart(4, "0")}.HK`;
-  }
-  if (/^\d{4,5}$/.test(raw)) {
-    return `${raw.padStart(4, "0")}.HK`;
-  }
-  return raw;
+  return String(input || "").trim().toUpperCase();
 }
 
 function normalizeErrorMessage(error) {
@@ -2341,6 +2346,9 @@ function isHttpOrigin() {
 }
 
 function formatNumber(value, minDigits = 2, maxDigits = 2) {
+  if (typeof coreUtils.formatNumber === "function") {
+    return coreUtils.formatNumber(value, minDigits, maxDigits);
+  }
   if (value == null || Number.isNaN(value)) return "--";
   return Number(value).toLocaleString(undefined, {
     minimumFractionDigits: minDigits,
@@ -2349,26 +2357,25 @@ function formatNumber(value, minDigits = 2, maxDigits = 2) {
 }
 
 function formatSigned(value) {
+  if (typeof coreUtils.formatSigned === "function") {
+    return coreUtils.formatSigned(value);
+  }
   if (value == null || Number.isNaN(value)) return "--";
-  const abs = Math.abs(value);
-  const fixed = abs.toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-  return `${value >= 0 ? "+" : "-"}${fixed}`;
+  return `${value >= 0 ? "+" : "-"}${Math.abs(value).toFixed(2)}`;
 }
 
 function formatSignedFixed(value, digits = 2) {
+  if (typeof coreUtils.formatSignedFixed === "function") {
+    return coreUtils.formatSignedFixed(value, digits);
+  }
   if (value == null || Number.isNaN(value)) return "--";
-  const abs = Math.abs(value);
-  const fixed = abs.toLocaleString(undefined, {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  });
-  return `${value >= 0 ? "+" : "-"}${fixed}`;
+  return `${value >= 0 ? "+" : "-"}${Math.abs(value).toFixed(digits)}`;
 }
 
 function formatCompact(value) {
+  if (typeof coreUtils.formatCompact === "function") {
+    return coreUtils.formatCompact(value);
+  }
   if (value == null || Number.isNaN(value)) return "--";
   return Number(value).toLocaleString(undefined, {
     notation: "compact",
@@ -2377,21 +2384,15 @@ function formatCompact(value) {
 }
 
 function escapeHtml(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+  if (typeof coreUtils.escapeHtml === "function") {
+    return coreUtils.escapeHtml(value);
+  }
+  return String(value ?? "");
 }
 
 function debounce(fn, waitMs) {
-  let timer = null;
-  return (...args) => {
-    if (timer) window.clearTimeout(timer);
-    timer = window.setTimeout(() => {
-      timer = null;
-      fn(...args);
-    }, waitMs);
-  };
+  if (typeof coreUtils.debounce === "function") {
+    return coreUtils.debounce(fn, waitMs);
+  }
+  return fn;
 }

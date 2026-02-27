@@ -10,6 +10,28 @@ const EASTMONEY_SEARCH_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8";
 const EASTMONEY_HISTORY_TOKEN = "fa5fd1943c7b386f172d6893dbfba10b";
 const QUOTE_TOPICS = new Set(["mixed", "economics", "philosophy", "engineering"]);
 const ALERT_HISTORY_LIMIT = 200;
+const DEFAULT_STATE_REVISION = 0;
+const UPSTREAM_TIMEOUT_MS = {
+  quote: 4500,
+  history: 7000,
+  search: 3500,
+  hn: 5000,
+};
+const UPSTREAM_RETRIES = {
+  quote: 1,
+  history: 1,
+  search: 1,
+  hn: 1,
+};
+const CACHE_TTL_MS = {
+  hn_top: 45 * 1000,
+  stock_search: 8 * 1000,
+};
+const CACHE_STALE_MS = {
+  hn_top: 2 * 60 * 1000,
+  stock_search: 20 * 1000,
+};
+const endpointCache = new Map();
 const QUOTE_LIBRARY = {
   economics: [
     {
@@ -78,6 +100,14 @@ const QUOTE_LIBRARY = {
     },
   ],
 };
+
+class UpstreamFetchError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "UpstreamFetchError";
+    this.details = details;
+  }
+}
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -150,19 +180,21 @@ async function handleQuote(url, res) {
       () => fetchTencentQuote(local),
       () => fetchYahooQuote(toYahooSymbol(input)),
     ];
+    const sourceErrors = [];
 
     for (const fn of attempts) {
       try {
         const quote = await fn();
         sendJson(res, 200, quote);
         return;
-      } catch {
-        // Continue to next source.
+      } catch (error) {
+        sourceErrors.push(normalizeUpstreamError(error));
       }
     }
 
     sendJson(res, 502, {
       error: `无法获取 ${input} 行情（数据源不可达或代码无效）`,
+      details: sourceErrors,
     });
     return;
   }
@@ -187,20 +219,41 @@ async function handleState(req, res) {
   if (req.method === "POST") {
     const payload = await readJsonBody(req);
     if (!payload || !Array.isArray(payload.cards)) {
-      sendJson(res, 400, { error: "状态格式错误，要求 { cards: [] }" });
+      sendJson(res, 400, { error: "状态格式错误，要求 { cards: [] , revision }" });
       return;
     }
 
     const currentState = await readStateFile();
+    const incomingRevision = Number(payload.revision);
+    if (!Number.isFinite(incomingRevision)) {
+      sendJson(res, 400, {
+        error: "缺少 revision 字段",
+        revision: currentState.revision,
+      });
+      return;
+    }
+    if (incomingRevision !== Number(currentState.revision || DEFAULT_STATE_REVISION)) {
+      sendJson(res, 409, {
+        error: "state revision conflict",
+        cards: currentState.cards,
+        alerts: currentState.alerts,
+        revision: currentState.revision,
+        updatedAt: currentState.updatedAt || Date.now(),
+      });
+      return;
+    }
+
     const normalizedAlerts = Object.prototype.hasOwnProperty.call(payload, "alerts")
       ? normalizeAlertState(payload.alerts)
       : normalizeAlertState(currentState.alerts);
+    const nextRevision = Number(currentState.revision || DEFAULT_STATE_REVISION) + 1;
     await writeStateFile({
       cards: payload.cards,
       alerts: normalizedAlerts,
+      revision: nextRevision,
       updatedAt: Date.now(),
     });
-    sendJson(res, 200, { ok: true });
+    sendJson(res, 200, { ok: true, revision: nextRevision });
     return;
   }
 
@@ -242,10 +295,23 @@ async function handleStockSearch(url, res) {
     token: EASTMONEY_SEARCH_TOKEN,
     count: String(limit),
   });
+  const endpoint = `https://searchapi.eastmoney.com/api/suggest/get?${params.toString()}`;
+  const cacheKey = `stock-search:${query.toUpperCase()}:${limit}`;
 
   try {
-    const endpoint = `https://searchapi.eastmoney.com/api/suggest/get?${params.toString()}`;
-    const payload = await fetchJson(endpoint);
+    const payload = await fetchCachedWithSwr(
+      cacheKey,
+      () =>
+        fetchJson(endpoint, {
+          source: "eastmoney-search",
+          timeoutMs: UPSTREAM_TIMEOUT_MS.search,
+          retries: UPSTREAM_RETRIES.search,
+        }),
+      {
+        ttlMs: CACHE_TTL_MS.stock_search,
+        staleMs: CACHE_STALE_MS.stock_search,
+      }
+    );
     const rows = Array.isArray(payload?.QuotationCodeTable?.Data)
       ? payload.QuotationCodeTable.Data
       : [];
@@ -288,24 +354,54 @@ async function handleStockHistory(url, res) {
 
 async function handleHnTop(url, res) {
   const limit = clampHnLimit(url.searchParams.get("limit"));
-  const topIds = await fetchJson(HN_TOP_STORIES_URL);
+  const cacheKey = `hn-top:${limit}`;
+  let items = [];
 
-  if (!Array.isArray(topIds) || !topIds.length) {
-    sendJson(res, 502, { error: "Hacker News 热门列表为空" });
+  try {
+    items = await fetchCachedWithSwr(
+      cacheKey,
+      async () => {
+        const topIds = await fetchJson(HN_TOP_STORIES_URL, {
+          source: "hn-topstories",
+          timeoutMs: UPSTREAM_TIMEOUT_MS.hn,
+          retries: UPSTREAM_RETRIES.hn,
+        });
+
+        if (!Array.isArray(topIds) || !topIds.length) {
+          throw new UpstreamFetchError("Hacker News 热门列表为空", {
+            source: "hn-topstories",
+          });
+        }
+
+        const ids = topIds.slice(0, limit);
+        const resolved = await Promise.all(
+          ids.map(async (id) => {
+            try {
+              const item = await fetchJson(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, {
+                source: "hn-item",
+                timeoutMs: UPSTREAM_TIMEOUT_MS.hn,
+                retries: UPSTREAM_RETRIES.hn,
+              });
+              return normalizeHnItem(item);
+            } catch {
+              return null;
+            }
+          })
+        );
+        return resolved.filter(Boolean);
+      },
+      {
+        ttlMs: CACHE_TTL_MS.hn_top,
+        staleMs: CACHE_STALE_MS.hn_top,
+      }
+    );
+  } catch (error) {
+    sendJson(res, 502, {
+      error: "Hacker News 热门列表获取失败",
+      details: [normalizeUpstreamError(error)],
+    });
     return;
   }
-
-  const ids = topIds.slice(0, limit);
-  const items = await Promise.all(
-    ids.map(async (id) => {
-      try {
-        const item = await fetchJson(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
-        return normalizeHnItem(item);
-      } catch {
-        return null;
-      }
-    })
-  );
 
   sendJson(res, 200, {
     items: items.filter(Boolean),
@@ -342,12 +438,11 @@ async function fetchEastMoneyQuote(local) {
   const fields = "f43,f44,f45,f47,f57,f58,f60,f124";
   const url = `https://push2.eastmoney.com/api/qt/stock/get?invt=2&fltt=2&secid=${secid}&fields=${fields}`;
 
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`EastMoney HTTP ${response.status}`);
-  }
-
-  const payload = await response.json();
+  const payload = await fetchJson(url, {
+    source: "eastmoney-quote",
+    timeoutMs: UPSTREAM_TIMEOUT_MS.quote,
+    retries: UPSTREAM_RETRIES.quote,
+  });
   const data = payload?.data;
   if (!data || data.f43 == null || data.f43 === "-") {
     throw new Error("EastMoney 无有效数据");
@@ -379,12 +474,11 @@ async function fetchTencentQuote(local) {
   const query = `${local.market.toLowerCase()}${local.code}`;
   const url = `https://qt.gtimg.cn/q=${query}`;
 
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Tencent HTTP ${response.status}`);
-  }
-
-  const raw = await response.text();
+  const raw = await fetchText(url, {
+    source: "tencent-quote",
+    timeoutMs: UPSTREAM_TIMEOUT_MS.quote,
+    retries: UPSTREAM_RETRIES.quote,
+  });
   const matched = raw.match(/="([^"]+)";/);
   if (!matched) {
     throw new Error("Tencent 响应无法解析");
@@ -422,12 +516,11 @@ async function fetchTencentQuote(local) {
 
 async function fetchYahooQuote(symbol) {
   const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbol)}`;
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Yahoo HTTP ${response.status}`);
-  }
-
-  const payload = await response.json();
+  const payload = await fetchJson(url, {
+    source: "yahoo-quote",
+    timeoutMs: UPSTREAM_TIMEOUT_MS.quote,
+    retries: UPSTREAM_RETRIES.quote,
+  });
   const quote = payload?.quoteResponse?.result?.[0];
   if (!quote || quote.regularMarketPrice == null) {
     throw new Error("Yahoo 无有效数据");
@@ -464,12 +557,11 @@ async function fetchEastMoneyHistory(local, limit) {
   });
   const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?${params.toString()}`;
 
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`EastMoney History HTTP ${response.status}`);
-  }
-
-  const payload = await response.json();
+  const payload = await fetchJson(url, {
+    source: "eastmoney-history",
+    timeoutMs: UPSTREAM_TIMEOUT_MS.history,
+    retries: UPSTREAM_RETRIES.history,
+  });
   const data = payload?.data;
   const rows = Array.isArray(data?.klines) ? data.klines : [];
   const items = rows.map(parseEastMoneyKline).filter(Boolean);
@@ -498,12 +590,11 @@ async function fetchYahooHistory(symbol, limit) {
   });
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?${params.toString()}`;
 
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`Yahoo History HTTP ${response.status}`);
-  }
-
-  const payload = await response.json();
+  const payload = await fetchJson(url, {
+    source: "yahoo-history",
+    timeoutMs: UPSTREAM_TIMEOUT_MS.history,
+    retries: UPSTREAM_RETRIES.history,
+  });
   const result = payload?.chart?.result?.[0];
   const quote = result?.indicators?.quote?.[0];
   const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
@@ -543,12 +634,119 @@ async function fetchYahooHistory(symbol, limit) {
   };
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+async function fetchJson(url, options = {}) {
+  const response = await fetchWithPolicy(url, {
+    ...options,
+    parseAs: "json",
+  });
+  return response.data;
+}
+
+async function fetchText(url, options = {}) {
+  const response = await fetchWithPolicy(url, {
+    ...options,
+    parseAs: "text",
+  });
+  return response.data;
+}
+
+async function fetchWithPolicy(url, options = {}) {
+  const source = String(options.source || "upstream");
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+    ? Math.max(800, Number(options.timeoutMs))
+    : 4000;
+  const retries = Number.isFinite(Number(options.retries))
+    ? Math.max(0, Math.floor(Number(options.retries)))
+    : 0;
+  const parseAs = options.parseAs === "text" ? "text" : "json";
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new UpstreamFetchError(`${source} HTTP ${response.status}`, {
+          source,
+          status: response.status,
+          retriable: response.status >= 500 || response.status === 429,
+          attempt,
+        });
+      }
+      const data = parseAs === "text" ? await response.text() : await response.json();
+      clearTimeout(timer);
+      return { data, status: response.status, source, attempts: attempt + 1 };
+    } catch (error) {
+      clearTimeout(timer);
+      const timedOut = error?.name === "AbortError";
+      const normalizedError =
+        error instanceof UpstreamFetchError
+          ? error
+          : new UpstreamFetchError(timedOut ? `${source} timeout` : normalizeError(error), {
+              source,
+              status: null,
+              retriable: true,
+              timeout: timedOut,
+              attempt,
+            });
+      lastError = normalizedError;
+      if (attempt >= retries) break;
+      const backoffMs = 120 * (attempt + 1);
+      await sleep(backoffMs);
+    }
   }
-  return response.json();
+
+  throw lastError || new UpstreamFetchError(`${source} request failed`, { source, retriable: true });
+}
+
+async function fetchCachedWithSwr(cacheKey, loader, options = {}) {
+  const ttlMs = Number.isFinite(Number(options.ttlMs)) ? Math.max(200, Number(options.ttlMs)) : 3000;
+  const staleMs = Number.isFinite(Number(options.staleMs)) ? Math.max(0, Number(options.staleMs)) : 0;
+  const now = Date.now();
+  const existing = endpointCache.get(cacheKey);
+
+  if (existing && now < existing.expiresAt) {
+    return existing.value;
+  }
+
+  if (existing && now < existing.staleUntil) {
+    if (!existing.refreshing) {
+      existing.refreshing = true;
+      Promise.resolve()
+        .then(loader)
+        .then((value) => {
+          endpointCache.set(cacheKey, {
+            value,
+            expiresAt: Date.now() + ttlMs,
+            staleUntil: Date.now() + ttlMs + staleMs,
+            refreshing: false,
+          });
+        })
+        .catch(() => {
+          existing.refreshing = false;
+        });
+    }
+    return existing.value;
+  }
+
+  const value = await loader();
+  endpointCache.set(cacheKey, {
+    value,
+    expiresAt: now + ttlMs,
+    staleUntil: now + ttlMs + staleMs,
+    refreshing: false,
+  });
+  return value;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, Number(ms) || 0));
+  });
 }
 
 function parseCnSymbol(input) {
@@ -756,16 +954,33 @@ async function readStateFile() {
     const raw = await fs.readFile(STATE_FILE, "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || !Array.isArray(parsed.cards)) {
-      return { cards: [], alerts: normalizeAlertState(null) };
+      return {
+        cards: [],
+        alerts: normalizeAlertState(null),
+        revision: DEFAULT_STATE_REVISION,
+        updatedAt: Date.now(),
+      };
     }
+    const revision = Number.isFinite(Number(parsed.revision))
+      ? Number(parsed.revision)
+      : Number.isFinite(Number(parsed.updatedAt))
+        ? Number(parsed.updatedAt)
+        : DEFAULT_STATE_REVISION;
     return {
       ...parsed,
       cards: parsed.cards,
       alerts: normalizeAlertState(parsed.alerts),
+      revision,
+      updatedAt: Number.isFinite(Number(parsed.updatedAt)) ? Number(parsed.updatedAt) : Date.now(),
     };
   } catch (error) {
     if (error && error.code === "ENOENT") {
-      return { cards: [], alerts: normalizeAlertState(null) };
+      return {
+        cards: [],
+        alerts: normalizeAlertState(null),
+        revision: DEFAULT_STATE_REVISION,
+        updatedAt: Date.now(),
+      };
     }
     throw error;
   }
@@ -830,6 +1045,27 @@ function normalizeError(error) {
   if (!error) return "";
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function normalizeUpstreamError(error) {
+  if (error instanceof UpstreamFetchError) {
+    return {
+      message: error.message,
+      source: error.details?.source || "",
+      status: error.details?.status ?? null,
+      timeout: Boolean(error.details?.timeout),
+      retriable: Boolean(error.details?.retriable),
+      attempt: Number.isFinite(Number(error.details?.attempt)) ? Number(error.details.attempt) : 0,
+    };
+  }
+  return {
+    message: normalizeError(error),
+    source: "",
+    status: null,
+    timeout: false,
+    retriable: false,
+    attempt: 0,
+  };
 }
 
 function sendJson(res, status, payload) {
