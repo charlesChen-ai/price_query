@@ -2,12 +2,13 @@
 
 A low-profile, card-based workspace for tracking market signals, reading curated information, and running lightweight strategy analysis/backtests.
 
-> Current stage: MVP. Focused on stock monitoring + analysis workflow.
+> Current stage: MVP. Focused on market monitoring + analysis workflow.
 
 ## Highlights
 
 - Card-based dashboard
   - Stock Quote Card (real-time quote, mini chart, intraday volume, PnL with cost basis)
+  - Commodity Quote Card (gold/silver/oil/copper/natural gas/platinum)
   - Hacker News Top Card
   - Quote / Thinking Snippet Card
 - Fine-grained per-card permissions

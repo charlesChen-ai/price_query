@@ -9,6 +9,15 @@ const HN_TOP_STORIES_URL = "https://hacker-news.firebaseio.com/v0/topstories.jso
 const EASTMONEY_SEARCH_TOKEN = "D43BF722C8E33BDC906FB84D85E326E8";
 const EASTMONEY_HISTORY_TOKEN = "fa5fd1943c7b386f172d6893dbfba10b";
 const QUOTE_TOPICS = new Set(["mixed", "economics", "philosophy", "engineering"]);
+const COMMODITY_SINA_CODE_MAP = {
+  "GC=F": { code: "hf_GC", tencentCode: "hf_GC", name: "COMEX 黄金", stooq: "gc.f" },
+  "SI=F": { code: "hf_SI", tencentCode: "hf_SI", name: "COMEX 白银", stooq: "si.f" },
+  "CL=F": { code: "hf_CL", tencentCode: "hf_CL", name: "NYMEX WTI 原油", stooq: "cl.f" },
+  "BZ=F": { code: "hf_OIL", tencentCode: "hf_OIL", name: "ICE 布伦特原油", stooq: "brn.f" },
+  "HG=F": { code: "hf_HG", tencentCode: "hf_HG", name: "COMEX 铜", stooq: "hg.f" },
+  "NG=F": { code: "hf_NG", tencentCode: "hf_NG", name: "NYMEX 天然气", stooq: "ng.f" },
+  "PL=F": { code: "hf_PL", tencentCode: "hf_PL", name: "NYMEX 铂金", stooq: "pl.f" },
+};
 const ALERT_HISTORY_LIMIT = 200;
 const DEFAULT_STATE_REVISION = 0;
 const UPSTREAM_TIMEOUT_MS = {
@@ -200,7 +209,33 @@ async function handleQuote(url, res) {
   }
 
   try {
-    const quote = await fetchYahooQuote(toYahooSymbol(input));
+    const normalized = toYahooSymbol(input);
+    const commodityMeta = COMMODITY_SINA_CODE_MAP[normalized];
+    if (commodityMeta) {
+      const sourceErrors = [];
+      const attempts = [
+        () => fetchSinaCommodityQuote(normalized, commodityMeta),
+        () => fetchTencentCommodityQuote(normalized, commodityMeta),
+        () => fetchYahooQuote(normalized),
+        () => fetchStooqCommodityQuote(normalized, commodityMeta),
+      ];
+      for (const fn of attempts) {
+        try {
+          const quote = await fn();
+          sendJson(res, 200, quote);
+          return;
+        } catch (error) {
+          sourceErrors.push(normalizeUpstreamError(error));
+        }
+      }
+      sendJson(res, 502, {
+        error: `无法获取 ${input} 行情（商品数据源不可达）`,
+        details: sourceErrors,
+      });
+      return;
+    }
+
+    const quote = await fetchYahooQuote(normalized);
     sendJson(res, 200, quote);
   } catch (error) {
     sendJson(res, 502, {
@@ -435,7 +470,7 @@ async function handleStatic(pathname, res) {
 
 async function fetchEastMoneyQuote(local) {
   const secid = `${local.market === "SH" ? "1" : "0"}.${local.code}`;
-  const fields = "f43,f44,f45,f47,f57,f58,f60,f124";
+  const fields = "f43,f44,f45,f47,f48,f57,f58,f60,f124";
   const url = `https://push2.eastmoney.com/api/qt/stock/get?invt=2&fltt=2&secid=${secid}&fields=${fields}`;
 
   const payload = await fetchJson(url, {
@@ -450,6 +485,9 @@ async function fetchEastMoneyQuote(local) {
 
   const price = scalePrice(data.f43);
   const prevClose = scalePrice(data.f60);
+  const turnover = numberOrNull(data.f48);
+  const volume = numberOrNull(data.f47);
+  const avgPrice = inferIntradayAvgPrice(price, turnover, volume);
   const change = price != null && prevClose != null ? price - prevClose : null;
   const changePercent =
     change != null && prevClose ? (change / prevClose) * 100 : null;
@@ -459,11 +497,12 @@ async function fetchEastMoneyQuote(local) {
     name: data.f58 || `${local.market}${local.code}`,
     price,
     prevClose,
+    avgPrice,
     change,
     changePercent,
     high: scalePrice(data.f44),
     low: scalePrice(data.f45),
-    volume: numberOrNull(data.f47),
+    volume,
     currency: "CNY",
     timestamp: data.f124 ? Number(data.f124) * 1000 : Date.now(),
     source: "eastmoney",
@@ -491,6 +530,13 @@ async function fetchTencentQuote(local) {
 
   const price = numberOrNull(parts[3]);
   const prevClose = numberOrNull(parts[4]);
+  const volume = numberOrNull(parts[36]);
+  const turnoverRaw = numberOrNull(parts[37]);
+  const avgPrice = inferIntradayAvgPrice(
+    price,
+    Number.isFinite(turnoverRaw) ? turnoverRaw * 10000 : null,
+    volume
+  );
   if (price == null || prevClose == null || prevClose === 0) {
     throw new Error("Tencent 无有效成交价");
   }
@@ -503,11 +549,12 @@ async function fetchTencentQuote(local) {
     name: parts[1] || `${local.market}${local.code}`,
     price,
     prevClose,
+    avgPrice,
     change,
     changePercent,
     high: numberOrNull(parts[33]),
     low: numberOrNull(parts[34]),
-    volume: numberOrNull(parts[36]),
+    volume,
     currency: "CNY",
     timestamp: parseTencentTime(parts[30]),
     source: "tencent",
@@ -531,6 +578,7 @@ async function fetchYahooQuote(symbol) {
     name: quote.shortName || quote.longName || symbol,
     price: quote.regularMarketPrice,
     prevClose: quote.regularMarketPreviousClose,
+    avgPrice: null,
     change: quote.regularMarketChange,
     changePercent: quote.regularMarketChangePercent,
     high: quote.regularMarketDayHigh,
@@ -539,6 +587,211 @@ async function fetchYahooQuote(symbol) {
     currency: quote.currency || "",
     timestamp: quote.regularMarketTime ? quote.regularMarketTime * 1000 : Date.now(),
     source: "yahoo",
+  };
+}
+
+function inferIntradayAvgPrice(price, turnover, volume) {
+  const px = numberOrNull(price);
+  const amt = numberOrNull(turnover);
+  const vol = numberOrNull(volume);
+  if (!Number.isFinite(amt) || !Number.isFinite(vol) || amt <= 0 || vol <= 0) return null;
+
+  const candidates = [
+    amt / vol,
+    amt / (vol * 100),
+    (amt * 100) / vol,
+    (amt * 10000) / vol,
+    (amt * 10000) / (vol * 100),
+  ].filter((value) => Number.isFinite(value) && value > 0);
+  if (!candidates.length) return null;
+
+  if (!Number.isFinite(px) || px <= 0) {
+    return candidates[0];
+  }
+
+  const sorted = candidates
+    .map((value) => ({
+      value,
+      err: Math.abs(value - px) / px,
+    }))
+    .sort((a, b) => a.err - b.err);
+  const best = sorted[0];
+  return best.err <= 0.65 ? best.value : null;
+}
+
+async function fetchSinaCommodityQuote(symbol, meta) {
+  const url = `https://hq.sinajs.cn/list=${encodeURIComponent(meta.code)}`;
+  const raw = await fetchText(url, {
+    source: "sina-commodity-quote",
+    timeoutMs: UPSTREAM_TIMEOUT_MS.quote,
+    retries: UPSTREAM_RETRIES.quote,
+  });
+  const matched = raw.match(/="([^"]*)";/);
+  if (!matched || !matched[1]) {
+    throw new Error("新浪商品行情为空");
+  }
+
+  const fields = matched[1].split(",").map((item) => String(item || "").trim());
+  if (!fields.length) {
+    throw new Error("新浪商品行情字段为空");
+  }
+
+  const name = fields[0] || meta.name || symbol;
+  const numericTail = fields.slice(1).map(numberOrNull).filter((value) => Number.isFinite(value));
+  if (!numericTail.length) {
+    throw new Error("新浪商品行情无有效价格");
+  }
+
+  const latest = numericTail[0];
+  const dayWindow = numericTail.slice(0, Math.min(6, numericTail.length));
+  const high = dayWindow.length ? Math.max(...dayWindow) : null;
+  const low = dayWindow.length ? Math.min(...dayWindow) : null;
+  const previous = Number.isFinite(numericTail[1]) && numericTail[1] > 0 ? numericTail[1] : null;
+  const change = previous != null ? latest - previous : null;
+  const changePercent = previous != null ? (change / previous) * 100 : null;
+
+  const dateToken = fields.find((item) => /^\d{4}-\d{2}-\d{2}$/.test(item));
+  const timeToken = fields.find((item) => /^\d{2}:\d{2}(:\d{2})?$/.test(item));
+  const timestamp =
+    dateToken && timeToken ? Date.parse(`${dateToken}T${timeToken.length === 5 ? `${timeToken}:00` : timeToken}`) : Date.now();
+
+  return {
+    symbol,
+    name,
+    price: latest,
+    prevClose: previous,
+    change,
+    changePercent,
+    high,
+    low,
+    volume: null,
+    currency: "USD",
+    timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
+    source: "sina-commodity",
+  };
+}
+
+async function fetchStooqCommodityQuote(symbol, meta) {
+  const stooqSymbol = String(meta?.stooq || "").trim();
+  if (!stooqSymbol) {
+    throw new Error("Stooq 商品代码缺失");
+  }
+
+  const url = `https://stooq.com/q/l/?s=${encodeURIComponent(stooqSymbol)}&i=d`;
+  const csv = await fetchText(url, {
+    source: "stooq-commodity-quote",
+    timeoutMs: UPSTREAM_TIMEOUT_MS.quote,
+    retries: UPSTREAM_RETRIES.quote,
+  });
+
+  const lines = String(csv || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length < 2) {
+    throw new Error("Stooq 商品行情为空");
+  }
+
+  const [headerLine, dataLine] = lines;
+  const header = headerLine.split(",").map((item) => item.trim().toLowerCase());
+  const data = dataLine.split(",").map((item) => item.trim());
+  if (!header.length || data.length < header.length) {
+    throw new Error("Stooq 商品行情格式异常");
+  }
+
+  const row = Object.create(null);
+  header.forEach((key, index) => {
+    row[key] = data[index];
+  });
+
+  const price = numberOrNull(row.close);
+  if (!Number.isFinite(price)) {
+    throw new Error("Stooq 商品无有效收盘价");
+  }
+
+  const high = numberOrNull(row.high);
+  const low = numberOrNull(row.low);
+  const open = numberOrNull(row.open);
+  const change = Number.isFinite(open) ? price - open : null;
+  const changePercent = Number.isFinite(open) && open !== 0 ? (change / open) * 100 : null;
+  const timestamp = Date.parse(`${row.date || ""}T${row.time || "00:00:00"}Z`);
+
+  return {
+    symbol,
+    name: meta?.name || symbol,
+    price,
+    prevClose: null,
+    change,
+    changePercent,
+    high,
+    low,
+    volume: numberOrNull(row.volume),
+    currency: "USD",
+    timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
+    source: "stooq-commodity",
+  };
+}
+
+async function fetchTencentCommodityQuote(symbol, meta) {
+  const queryCode = String(meta?.tencentCode || "").trim();
+  if (!queryCode) {
+    throw new Error("腾讯商品代码缺失");
+  }
+
+  const url = `https://qt.gtimg.cn/q=${encodeURIComponent(queryCode)}`;
+  const raw = await fetchText(url, {
+    source: "tencent-commodity-quote",
+    timeoutMs: UPSTREAM_TIMEOUT_MS.quote,
+    retries: UPSTREAM_RETRIES.quote,
+  });
+  const matched = raw.match(/="([^"]*)";/);
+  if (!matched || !matched[1]) {
+    throw new Error("腾讯商品行情为空");
+  }
+
+  const fields = matched[1].split(",").map((item) => String(item || "").trim());
+  if (!fields.length) {
+    throw new Error("腾讯商品行情字段为空");
+  }
+
+  const name = fields[0] || meta?.name || symbol;
+  const numericValues = fields
+    .slice(1)
+    .map(numberOrNull)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (!numericValues.length) {
+    throw new Error("腾讯商品行情无有效价格");
+  }
+
+  const price = numericValues[0];
+  const prevClose = Number.isFinite(numericValues[1]) ? numericValues[1] : null;
+  const open = Number.isFinite(numericValues[2]) ? numericValues[2] : null;
+  const high = Number.isFinite(numericValues[3]) ? numericValues[3] : null;
+  const low = Number.isFinite(numericValues[4]) ? numericValues[4] : null;
+
+  let change = null;
+  let changePercent = null;
+  if (Number.isFinite(prevClose) && prevClose !== 0) {
+    change = price - prevClose;
+    changePercent = (change / prevClose) * 100;
+  } else if (Number.isFinite(open) && open !== 0) {
+    change = price - open;
+    changePercent = (change / open) * 100;
+  }
+
+  return {
+    symbol,
+    name,
+    price,
+    prevClose,
+    change,
+    changePercent,
+    high,
+    low,
+    volume: null,
+    currency: "USD",
+    timestamp: Date.now(),
+    source: "tencent-commodity",
   };
 }
 

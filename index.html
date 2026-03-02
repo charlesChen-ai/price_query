@@ -139,6 +139,7 @@
           卡片类型
           <select id="cardType" required>
             <option value="stock">股票</option>
+            <option value="commodity">大宗商品</option>
             <option value="hn">Hacker News 热门</option>
             <option value="quote">Quote / 思维片段</option>
           </select>
@@ -156,6 +157,19 @@
         </label>
         <datalist id="stockSuggestList"></datalist>
 
+        <label id="commodityField" class="is-hidden">
+          大宗商品
+          <select id="commodityInput">
+            <option value="GC=F" selected>黄金 (Gold)</option>
+            <option value="SI=F">白银 (Silver)</option>
+            <option value="CL=F">WTI 原油 (Crude Oil)</option>
+            <option value="BZ=F">布伦特原油 (Brent)</option>
+            <option value="HG=F">铜 (Copper)</option>
+            <option value="NG=F">天然气 (Natural Gas)</option>
+            <option value="PL=F">铂金 (Platinum)</option>
+          </select>
+        </label>
+
         <label>
           卡片标题（可选）
           <input id="nameInput" type="text" placeholder="如 贵州茅台" />
@@ -164,6 +178,8 @@
         <label>
           刷新频率
           <select id="refreshInterval">
+            <option value="2000">2 秒（极速）</option>
+            <option value="3000">3 秒（极速）</option>
             <option value="5000">5 秒</option>
             <option value="10000" selected>10 秒</option>
             <option value="15000">15 秒</option>
@@ -228,6 +244,8 @@
         <label>
           刷新频率
           <select id="permissionRefreshInterval">
+            <option value="2000">2 秒（极速）</option>
+            <option value="3000">3 秒（极速）</option>
             <option value="5000">5 秒</option>
             <option value="10000">10 秒</option>
             <option value="15000">15 秒</option>

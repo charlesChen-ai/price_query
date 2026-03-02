@@ -1,5 +1,9 @@
 const STORAGE_KEY = "stock_dashboard_cards_v1";
 const ALERT_STORAGE_KEY = "stock_dashboard_alert_engine_v1";
+const FAST_REFRESH_MIN_MS = 2000;
+const NORMAL_REFRESH_MIN_MS = 5000;
+const CONTENT_REFRESH_MIN_MS = 30000;
+const REFRESH_INTERVAL_DEFAULT_MS = 10000;
 const MAX_HISTORY_POINTS = 36;
 const DAILY_HISTORY_DAYS = 160;
 const DAILY_HISTORY_REFRESH_MS = 30 * 60 * 1000;
@@ -10,6 +14,16 @@ const HN_MIN_LIMIT = 3;
 const HN_MAX_LIMIT = 20;
 const QUOTE_DEFAULT_TOPIC = "mixed";
 const QUOTE_TOPICS = new Set(["mixed", "economics", "philosophy", "engineering"]);
+const COMMODITY_DEFAULT_SYMBOL = "GC=F";
+const COMMON_COMMODITIES = [
+  { symbol: "GC=F", name: "黄金" },
+  { symbol: "SI=F", name: "白银" },
+  { symbol: "CL=F", name: "WTI 原油" },
+  { symbol: "BZ=F", name: "布伦特原油" },
+  { symbol: "HG=F", name: "铜" },
+  { symbol: "NG=F", name: "天然气" },
+  { symbol: "PL=F", name: "铂金" },
+];
 const DEFAULT_CARD_VISUAL_SIZE = "standard";
 const CARD_VISUAL_SIZES = new Set(["compact", "standard", "expanded"]);
 const coreUtils = window.DashboardCore || {};
@@ -124,6 +138,16 @@ const STOCK_PERMISSION_KEYS = [
   "showVolumeChart",
 ];
 
+const COMMODITY_PERMISSION_KEYS = [
+  "showPrice",
+  "showChange",
+  "showHighLow",
+  "showVolume",
+  "showTimestamp",
+  "showChart",
+  "showVolumeChart",
+];
+
 const HN_PERMISSION_KEYS = [
   "showHnScore",
   "showHnComments",
@@ -143,6 +167,7 @@ const COMMON_PERMISSION_KEYS = ["allowManualRefresh", "allowEdit", "allowDelete"
 
 const PERMISSION_KEYS_BY_TYPE = {
   stock: [...STOCK_PERMISSION_KEYS, ...COMMON_PERMISSION_KEYS],
+  commodity: [...COMMODITY_PERMISSION_KEYS, ...COMMON_PERMISSION_KEYS],
   hn: [...HN_PERMISSION_KEYS, ...COMMON_PERMISSION_KEYS],
   quote: [...QUOTE_PERMISSION_KEYS, ...COMMON_PERMISSION_KEYS],
 };
@@ -224,6 +249,7 @@ const refs = {
   cardType: document.getElementById("cardType"),
   symbolInput: document.getElementById("symbolInput"),
   stockSuggestList: document.getElementById("stockSuggestList"),
+  commodityInput: document.getElementById("commodityInput"),
   nameInput: document.getElementById("nameInput"),
   refreshInterval: document.getElementById("refreshInterval"),
   createCardVisualField: document.getElementById("createCardVisualField"),
@@ -232,6 +258,7 @@ const refs = {
   hnLimitInput: document.getElementById("hnLimitInput"),
   quoteTopicInput: document.getElementById("quoteTopicInput"),
   stockSymbolField: document.getElementById("stockSymbolField"),
+  commodityField: document.getElementById("commodityField"),
   stockCostField: document.getElementById("stockCostField"),
   hnLimitField: document.getElementById("hnLimitField"),
   quoteTopicField: document.getElementById("quoteTopicField"),
@@ -323,6 +350,14 @@ function bindEvents() {
     tryApplySuggestionMeta(refs.symbolInput.value.trim());
   });
 
+  refs.commodityInput.addEventListener("change", () => {
+    if (refs.cardType.value !== "commodity") return;
+    const commodity = resolveCommodityMeta(refs.commodityInput.value);
+    if (!refs.nameInput.value.trim() || COMMON_COMMODITIES.some((item) => item.name === refs.nameInput.value.trim())) {
+      refs.nameInput.value = commodity.name;
+    }
+  });
+
   refs.closeCreateDialog.addEventListener("click", () => refs.createDialog.close());
   refs.closePermissionDialog.addEventListener("click", () => refs.permissionDialog.close());
 
@@ -403,7 +438,7 @@ function bindEvents() {
     event.preventDefault();
 
     const type = refs.cardType.value;
-    const refreshInterval = Number(refs.refreshInterval.value);
+    const refreshInterval = parseRefreshIntervalForType(refs.refreshInterval.value, type);
     const visualSize = type === "hn" ? parseCardVisualSize(refs.cardVisualSize.value) : DEFAULT_CARD_VISUAL_SIZE;
     const permissions = collectPermissions(refs.createForm, type);
 
@@ -415,6 +450,18 @@ function bindEvents() {
         visualSize,
         permissions,
         hnLimit: parseHnLimit(refs.hnLimitInput.value),
+      });
+    } else if (type === "commodity") {
+      const commodity = resolveCommodityMeta(refs.commodityInput.value || COMMODITY_DEFAULT_SYMBOL);
+      if (!refs.nameInput.value.trim()) {
+        refs.nameInput.value = commodity.name;
+      }
+      card = buildCommodityCard({
+        symbol: commodity.symbol,
+        title: refs.nameInput.value.trim(),
+        refreshInterval,
+        visualSize,
+        permissions,
       });
     } else if (type === "quote") {
       card = buildQuoteCard({
@@ -461,6 +508,7 @@ function bindEvents() {
     refs.createForm.reset();
     refs.cardType.value = "stock";
     refs.cardVisualSize.value = DEFAULT_CARD_VISUAL_SIZE;
+    refs.commodityInput.value = COMMODITY_DEFAULT_SYMBOL;
     refs.hnLimitInput.value = String(HN_DEFAULT_LIMIT);
     refs.quoteTopicInput.value = QUOTE_DEFAULT_TOPIC;
     clearStockSuggestions();
@@ -475,7 +523,7 @@ function bindEvents() {
     if (!card) return;
 
     card.permissions = collectPermissions(refs.permissionForm, card.type);
-    card.refreshInterval = Number(refs.permissionRefreshInterval.value);
+    card.refreshInterval = parseRefreshIntervalForType(refs.permissionRefreshInterval.value, card.type);
     if (card.type === "hn" || card.type === "quote") {
       card.visualSize = parseCardVisualSize(refs.permissionCardVisualSize.value);
     } else {
@@ -537,12 +585,14 @@ function bindEvents() {
 
 function syncCreateFormByType(type) {
   const isStock = type === "stock";
+  const isCommodity = type === "commodity";
   const isHn = type === "hn";
   const isQuote = type === "quote";
 
   refs.stockSymbolField.classList.toggle("is-hidden", !isStock);
+  refs.commodityField.classList.toggle("is-hidden", !isCommodity);
   refs.stockCostField.classList.toggle("is-hidden", !isStock);
-  refs.createCardVisualField.classList.toggle("is-hidden", isStock);
+  refs.createCardVisualField.classList.toggle("is-hidden", isStock || isCommodity);
   refs.hnLimitField.classList.toggle("is-hidden", !isHn);
   refs.quoteTopicField.classList.toggle("is-hidden", !isQuote);
 
@@ -552,15 +602,23 @@ function syncCreateFormByType(type) {
     refs.costInput.value = "";
     clearStockSuggestions();
     const currentName = refs.nameInput.value.trim();
-    if ((isHn && (!currentName || currentName === "思维片段")) || (isQuote && (!currentName || currentName === "Hacker News 热门"))) {
+    if (isCommodity && (!currentName || currentName === "Hacker News 热门" || currentName === "思维片段")) {
+      refs.nameInput.value = resolveCommodityMeta(refs.commodityInput.value || COMMODITY_DEFAULT_SYMBOL).name;
+    } else if (
+      (isHn && (!currentName || currentName === "思维片段")) ||
+      (isQuote && (!currentName || currentName === "Hacker News 热门"))
+    ) {
       refs.nameInput.value = isHn ? "Hacker News 热门" : "思维片段";
     }
-    if (Number(refs.refreshInterval.value) < 30000) {
+    if ((isHn || isQuote) && Number(refs.refreshInterval.value) < 30000) {
       refs.refreshInterval.value = "60000";
     }
   }
 
-  if (isStock && (refs.nameInput.value.trim() === "Hacker News 热门" || refs.nameInput.value.trim() === "思维片段")) {
+  if (
+    (isStock || isCommodity) &&
+    (refs.nameInput.value.trim() === "Hacker News 热门" || refs.nameInput.value.trim() === "思维片段")
+  ) {
     refs.nameInput.value = "";
   }
 
@@ -635,6 +693,35 @@ function buildStockCard({
   };
 }
 
+function buildCommodityCard({ symbol, title, refreshInterval, visualSize, permissions }) {
+  const commodity = resolveCommodityMeta(symbol);
+  return {
+    id: crypto.randomUUID(),
+    type: "commodity",
+    symbol: commodity.symbol,
+    querySymbol: commodity.symbol,
+    name: title || commodity.name,
+    refreshInterval,
+    visualSize: DEFAULT_CARD_VISUAL_SIZE,
+    costPrice: null,
+    permissions: {
+      ...permissions,
+      showPnL: false,
+      showTechnicals: false,
+    },
+    history: [],
+    dailySeries: [],
+    dailySeriesUpdatedAt: 0,
+    volumeHistory: [],
+    prevCumulativeVolume: null,
+    technicals: null,
+    quote: null,
+    status: "等待刷新",
+    lastUpdatedAt: 0,
+    isRefreshing: false,
+  };
+}
+
 function buildDefaultAlertEngineState() {
   return {
     enabled: true,
@@ -681,13 +768,23 @@ function buildQuoteCard({ title, refreshInterval, visualSize, permissions, quote
   };
 }
 
+function resolveCommodityMeta(symbolInput) {
+  const normalized = String(symbolInput || COMMODITY_DEFAULT_SYMBOL).trim().toUpperCase();
+  const matched =
+    COMMON_COMMODITIES.find((item) => String(item.symbol).toUpperCase() === normalized) || COMMON_COMMODITIES[0];
+  return {
+    symbol: matched.symbol,
+    name: matched.name,
+  };
+}
+
 function openPermissionDialog(cardId) {
   const card = state.cards.find((item) => item.id === cardId);
   if (!card) return;
 
   refs.permissionCardId.value = card.id;
   refs.permissionRefreshInterval.value = String(card.refreshInterval);
-  refs.permissionCardVisualField.classList.toggle("is-hidden", card.type === "stock");
+  refs.permissionCardVisualField.classList.toggle("is-hidden", card.type === "stock" || card.type === "commodity");
   refs.permissionCardVisualSize.value = parseCardVisualSize(card.visualSize);
 
   const isStock = card.type === "stock";
@@ -752,7 +849,7 @@ function startRefreshLoop() {
     if (refreshTargets.length) {
       await Promise.all(refreshTargets.map((card) => refreshCard(card.id, false)));
     }
-  }, 1200);
+  }, 400);
 }
 
 async function refreshCard(cardId, manual = false) {
@@ -781,6 +878,8 @@ async function refreshCard(cardId, manual = false) {
       await refreshHnCardData(card);
     } else if (card.type === "quote") {
       await refreshQuoteCardData(card);
+    } else if (card.type === "commodity") {
+      await refreshCommodityCardData(card);
     } else {
       await refreshStockCardData(card);
     }
@@ -827,6 +926,22 @@ async function refreshStockCardData(card) {
 
   card.status = `已更新 ${formatTime(quote.timestamp)}${historySyncFailed ? " · 日线缓存沿用本地数据" : ""}`;
   monitorCardAlerts(card, previousQuote, previousTechnicals);
+}
+
+async function refreshCommodityCardData(card) {
+  const quote = await fetchStockQuote(card.querySymbol);
+  card.quote = quote;
+  card.history.push(quote.price);
+  appendVolumeDelta(card, quote.volume);
+
+  if (card.history.length > MAX_HISTORY_POINTS) {
+    card.history.splice(0, card.history.length - MAX_HISTORY_POINTS);
+  }
+  if (card.volumeHistory.length > MAX_HISTORY_POINTS) {
+    card.volumeHistory.splice(0, card.volumeHistory.length - MAX_HISTORY_POINTS);
+  }
+
+  card.status = `已更新 ${formatTime(quote.timestamp)}`;
 }
 
 async function refreshHnCardData(card) {
@@ -1017,7 +1132,16 @@ async function fetchLocalQuote(symbol) {
     let message = `本地代理错误 ${response.status}`;
     try {
       const payload = await response.json();
-      if (payload?.error) message = payload.error;
+      if (payload?.error) {
+        message = payload.error;
+        if (Array.isArray(payload.details) && payload.details.length) {
+          const brief = payload.details
+            .slice(0, 3)
+            .map((item) => `${item.source || "source"}: ${item.message || "unknown error"}`)
+            .join(" | ");
+          if (brief) message = `${message}（${brief}）`;
+        }
+      }
     } catch {
       // Keep generic message.
     }
@@ -1232,10 +1356,12 @@ function hydrateCards(cards) {
   if (!Array.isArray(cards)) return [];
 
   return cards.map((card) => {
-    const type = card?.type === "hn" ? "hn" : card?.type === "quote" ? "quote" : "stock";
+    const type =
+      card?.type === "hn" ? "hn" : card?.type === "quote" ? "quote" : card?.type === "commodity" ? "commodity" : "stock";
     const hydrated = {
       ...card,
       type,
+      refreshInterval: parseRefreshIntervalForType(card?.refreshInterval, type),
       permissions: { ...defaultPermissions, ...(card.permissions || {}) },
       status: card.status || "等待刷新",
       lastUpdatedAt: card.lastUpdatedAt || 0,
@@ -1255,6 +1381,29 @@ function hydrateCards(cards) {
       hydrated.visualSize = parseCardVisualSize(card.visualSize);
       hydrated.quoteTopic = parseQuoteTopic(card.quoteTopic);
       hydrated.quoteItem = card.quoteItem ? normalizeQuoteItem(card.quoteItem) : null;
+      return hydrated;
+    }
+
+    if (type === "commodity") {
+      const commodity = resolveCommodityMeta(card.querySymbol || card.symbol);
+      hydrated.symbol = commodity.symbol;
+      hydrated.querySymbol = commodity.symbol;
+      hydrated.visualSize = DEFAULT_CARD_VISUAL_SIZE;
+      hydrated.costPrice = null;
+      hydrated.history = Array.isArray(card.history) ? card.history : [];
+      hydrated.dailySeries = [];
+      hydrated.dailySeriesUpdatedAt = 0;
+      hydrated.volumeHistory = Array.isArray(card.volumeHistory) ? card.volumeHistory : [];
+      hydrated.prevCumulativeVolume =
+        Number.isFinite(Number(card.prevCumulativeVolume)) ? Number(card.prevCumulativeVolume) : null;
+      hydrated.quote = card.quote || null;
+      hydrated.technicals = null;
+      hydrated.name = card.name || commodity.name;
+      hydrated.permissions = {
+        ...hydrated.permissions,
+        showPnL: false,
+        showTechnicals: false,
+      };
       return hydrated;
     }
 
@@ -2506,6 +2655,7 @@ function populateCardElement(node, card, options = {}) {
 
   node.classList.remove(
     "card-type-stock",
+    "card-type-commodity",
     "card-type-hn",
     "card-type-quote",
     "card-size-compact",
@@ -2513,14 +2663,20 @@ function populateCardElement(node, card, options = {}) {
     "card-size-expanded"
   );
   node.classList.add(
-    card.type === "hn" ? "card-type-hn" : card.type === "quote" ? "card-type-quote" : "card-type-stock"
+    card.type === "hn"
+      ? "card-type-hn"
+      : card.type === "quote"
+        ? "card-type-quote"
+        : card.type === "commodity"
+          ? "card-type-commodity"
+          : "card-type-stock"
   );
   const visualSizeClass =
-    card.type === "stock" ? DEFAULT_CARD_VISUAL_SIZE : parseCardVisualSize(card.visualSize);
+    card.type === "stock" || card.type === "commodity" ? DEFAULT_CARD_VISUAL_SIZE : parseCardVisualSize(card.visualSize);
   node.classList.add(`card-size-${visualSizeClass}`);
 
   symbolEl.textContent =
-    card.type === "hn" ? "HN TOP" : card.type === "quote" ? "QUOTE" : card.querySymbol;
+    card.type === "hn" ? "HN TOP" : card.type === "quote" ? "QUOTE" : card.type === "commodity" ? "CMDTY" : card.querySymbol;
   nameEl.textContent = card.name;
   statusEl.textContent = card.status;
 
@@ -2541,9 +2697,23 @@ function populateCardElement(node, card, options = {}) {
     renderHnBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap);
   } else if (card.type === "quote") {
     renderQuoteBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap);
+  } else if (card.type === "commodity") {
+    renderCommodityBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap);
   } else {
     renderStockBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap);
   }
+}
+
+function renderCommodityBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap) {
+  const commodityCard = {
+    ...card,
+    permissions: {
+      ...card.permissions,
+      showPnL: false,
+      showTechnicals: false,
+    },
+  };
+  renderStockBody(commodityCard, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap);
 }
 
 function renderStockBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap) {
@@ -2575,7 +2745,10 @@ function renderStockBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWr
     }
 
     if (card.permissions.showPrice) {
-      metaRows.push(stockMetricItem("最新价", `${formatNumber(quote.price)} ${quote.currency || ""}`));
+      const priceDirection = card.type === "stock" ? buildLatestPriceDirectionArrow(card, quote) : "";
+      metaRows.push(
+        stockMetricItem("最新价", `${formatNumber(quote.price)} ${quote.currency || ""} ${priceDirection}`.trim())
+      );
     }
 
     if (card.permissions.showHighLow) {
@@ -2595,6 +2768,19 @@ function renderStockBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWr
         stockMetricItem(
           "成本价",
           card.costPrice == null ? "未设置" : `${formatNumber(card.costPrice, 4, 4)} ${quote.currency || ""}`
+        )
+      );
+    }
+
+    if (card.type === "stock") {
+      const intradayAvgPrice = computeIntradayAveragePrice(card, quote);
+      const avgDirection = buildAvgDirectionArrow(quote?.price, intradayAvgPrice);
+      metaRows.push(
+        stockMetricItem(
+          "分时均价",
+          intradayAvgPrice == null
+            ? "--"
+            : `${formatNumber(intradayAvgPrice)} ${quote.currency || ""} ${avgDirection}`.trim()
         )
       );
     }
@@ -2910,10 +3096,54 @@ function appendVolumeDelta(card, cumulativeVolume) {
   card.volumeHistory.push(delta);
 }
 
+function computeIntradayAveragePrice(card, quote) {
+  const official = numberOrNull(quote?.avgPrice);
+  return Number.isFinite(official) && official > 0 ? official : null;
+}
+
+function buildAvgDirectionArrow(priceInput, avgInput) {
+  const price = numberOrNull(priceInput);
+  const avg = numberOrNull(avgInput);
+  if (!Number.isFinite(price) || !Number.isFinite(avg) || avg <= 0) return "→";
+
+  const diffRatio = Math.abs(price - avg) / avg;
+  if (diffRatio <= 0.0002) return "→";
+  return price > avg ? "↑" : "↓";
+}
+
+function buildLatestPriceDirectionArrow(card, quote) {
+  const current = numberOrNull(quote?.price);
+  if (!Number.isFinite(current) || current <= 0) return "→";
+
+  const history = Array.isArray(card?.history) ? card.history : [];
+  if (history.length < 2) return "→";
+
+  const previous = numberOrNull(history[history.length - 2]);
+  if (!Number.isFinite(previous) || previous <= 0) return "→";
+
+  const diffRatio = Math.abs(current - previous) / previous;
+  if (diffRatio <= 0.00005) return "→";
+  return current > previous ? "↑" : "↓";
+}
+
 function parseHnLimit(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return HN_DEFAULT_LIMIT;
   return Math.min(HN_MAX_LIMIT, Math.max(HN_MIN_LIMIT, Math.round(parsed)));
+}
+
+function parseRefreshIntervalForType(value, type) {
+  const parsed = Number(value);
+  const fallback = REFRESH_INTERVAL_DEFAULT_MS;
+  const min =
+    type === "hn" || type === "quote"
+      ? CONTENT_REFRESH_MIN_MS
+      : type === "stock" || type === "commodity"
+        ? FAST_REFRESH_MIN_MS
+        : NORMAL_REFRESH_MIN_MS;
+  const max = 10 * 60 * 1000;
+  if (!Number.isFinite(parsed)) return Math.max(min, fallback);
+  return Math.min(max, Math.max(min, Math.round(parsed)));
 }
 
 function parseQuoteTopic(value) {
