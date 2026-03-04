@@ -10,6 +10,8 @@ test("shouldAllowSameBarEntry respects noSameBarReentry", () => {
 
 test("signalSourceForStrategy resolves source", () => {
   assert.equal(signalSourceForStrategy("macd_cross", "buy", "signal"), "MACD");
+  assert.equal(signalSourceForStrategy("kdj_cross", "buy", "signal"), "KDJ");
+  assert.equal(signalSourceForStrategy("bollinger_reversion", "sell", "signal"), "BOLL");
   assert.equal(signalSourceForStrategy("price_breakout", "sell", "signal"), "Breakdown");
   assert.equal(signalSourceForStrategy("hybrid", "sell", "stop_loss"), "Risk");
 });

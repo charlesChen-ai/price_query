@@ -22,6 +22,8 @@
     if (strategyType === "ma_cross") return "MA";
     if (strategyType === "macd_cross") return "MACD";
     if (strategyType === "rsi_reversion") return "RSI";
+    if (strategyType === "kdj_cross") return "KDJ";
+    if (strategyType === "bollinger_reversion") return "BOLL";
     if (strategyType === "price_breakout") return direction === "buy" ? "Breakout" : "Breakdown";
     return "Composite";
   }

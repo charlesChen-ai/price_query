@@ -73,6 +73,46 @@ const STRATEGY_PRESETS = {
       rsiCeil: 68,
     },
   },
+  kdj_cross: {
+    label: "KDJ 金叉死叉",
+    description: "K 线上穿 D 线买入、下穿卖出，可选超买超卖区过滤",
+    fields: [
+      { key: "kdjPeriod", label: "KDJ 周期", type: "number", min: 6, max: 30, step: 1 },
+      { key: "buyThreshold", label: "买入区阈值", type: "number", min: 5, max: 50, step: 1 },
+      { key: "sellThreshold", label: "卖出区阈值", type: "number", min: 50, max: 95, step: 1 },
+      { key: "requireZoneFilter", label: "仅在超买/超卖区触发", type: "checkbox" },
+    ],
+    defaults: {
+      kdjPeriod: 9,
+      buyThreshold: 30,
+      sellThreshold: 70,
+      requireZoneFilter: true,
+    },
+  },
+  bollinger_reversion: {
+    label: "布林回归",
+    description: "回踩下轨后反弹买入，回到中轨/上轨离场",
+    fields: [
+      { key: "bollPeriod", label: "布林周期", type: "number", min: 10, max: 80, step: 1 },
+      { key: "bollStd", label: "标准差倍数", type: "number", min: 1, max: 3.5, step: 0.1 },
+      {
+        key: "exitMode",
+        label: "离场方式",
+        type: "select",
+        options: [
+          { value: "mid", label: "中轨离场" },
+          { value: "upper", label: "上轨离场" },
+        ],
+      },
+      { key: "useTrendFilter", label: "启用 MA20 趋势过滤", type: "checkbox" },
+    ],
+    defaults: {
+      bollPeriod: 20,
+      bollStd: 2,
+      exitMode: "mid",
+      useTrendFilter: false,
+    },
+  },
   price_breakout: {
     label: "价格突破",
     description: "价格突破近期高点买入，跌破低点卖出，可选 MA20 过滤",
@@ -243,6 +283,11 @@ function bindAnalysisEvents() {
         execution: analysisState.strategyConfig?.execution,
       });
       renderStrategyControls();
+      persistStrategyConfig();
+      if (analysisState.rawBars.length) {
+        stopPlayback();
+        void recomputeAnalysis(false);
+      }
     });
   }
 
@@ -838,6 +883,24 @@ function getSignalLegendByStrategy(configInput) {
       sellLabel: "卖点标记(MACD)",
       buyHint: `MACD 金叉${params.useRsiFilter ? `，且 RSI 在 ${params.rsiFloor}-${params.rsiCeil}` : ""}`,
       sellHint: `MACD 死叉${params.useRsiFilter ? `，或 RSI > ${params.rsiCeil}` : ""}`,
+    };
+  }
+
+  if (config.type === "kdj_cross") {
+    return {
+      buyLabel: "买点标记(KDJ)",
+      sellLabel: "卖点标记(KDJ)",
+      buyHint: `K 线上穿 D 线${params.requireZoneFilter ? `，并处于低位区 <= ${params.buyThreshold}` : ""}`,
+      sellHint: `K 线下穿 D 线${params.requireZoneFilter ? `，并处于高位区 >= ${params.sellThreshold}` : ""}`,
+    };
+  }
+
+  if (config.type === "bollinger_reversion") {
+    return {
+      buyLabel: "买点标记(BOLL)",
+      sellLabel: "卖点标记(BOLL)",
+      buyHint: `跌破下轨后收回下轨上方${params.useTrendFilter ? "，并满足 MA20 过滤" : ""}`,
+      sellHint: `触达${params.exitMode === "upper" ? "上轨" : "中轨"}离场，或再次跌回下轨下方`,
     };
   }
 
@@ -1597,6 +1660,9 @@ function buildStrategySeries(bars, indicators, strategyConfig) {
   const rsiPeriod = Number(params.rsiPeriod) || 14;
   const rsiSeries =
     rsiPeriod === 14 ? indicators.map((item) => numberOrNull(item?.rsi14)) : calculateRsiSeries(closes, rsiPeriod);
+  const kdjPeriod = Number(params.kdjPeriod) || 9;
+  const kdjSeries = calculateKdjSeries(bars, kdjPeriod);
+  const boll = calculateBollingerSeries(closes, Number(params.bollPeriod) || 20, Number(params.bollStd) || 2);
   const breakoutSeries = calculateRollingExtremeSeries(highs, Number(params.breakoutPeriod) || 20, "max", 1);
   const breakdownSeries = calculateRollingExtremeSeries(lows, Number(params.breakdownPeriod) || 10, "min", 1);
 
@@ -1608,6 +1674,12 @@ function buildStrategySeries(bars, indicators, strategyConfig) {
     maTrend: numberOrNull(maTrendSeries[index]),
     histogram: numberOrNull(indicators[index]?.histogram),
     rsi: numberOrNull(rsiSeries[index]),
+    k: numberOrNull(kdjSeries[index]?.k),
+    d: numberOrNull(kdjSeries[index]?.d),
+    j: numberOrNull(kdjSeries[index]?.j),
+    bollMiddle: numberOrNull(boll.middle[index]),
+    bollUpper: numberOrNull(boll.upper[index]),
+    bollLower: numberOrNull(boll.lower[index]),
     breakout: numberOrNull(breakoutSeries[index]),
     breakdown: numberOrNull(breakdownSeries[index]),
   }));
@@ -1630,6 +1702,21 @@ function shouldEnterStrategy(type, previous, current, params) {
       !params.useRsiFilter ||
       (Number.isFinite(current.rsi) && current.rsi >= Number(params.rsiFloor) && current.rsi <= Number(params.rsiCeil));
     return macdCrossUp && rsiAllowed;
+  }
+
+  if (type === "kdj_cross") {
+    const kdjCrossUp = isCrossUp(previous.k, current.k, previous.d, current.d);
+    const zoneAllowed =
+      !params.requireZoneFilter ||
+      ((Number.isFinite(current.k) && current.k <= Number(params.buyThreshold)) ||
+        (Number.isFinite(current.d) && current.d <= Number(params.buyThreshold)));
+    return kdjCrossUp && zoneAllowed;
+  }
+
+  if (type === "bollinger_reversion") {
+    const reclaimLowerBand = isCrossUp(previous.close, current.close, previous.bollLower, current.bollLower);
+    const trendAllowed = !params.useTrendFilter || !Number.isFinite(current.maTrend) || current.close >= current.maTrend;
+    return reclaimLowerBand && trendAllowed;
   }
 
   if (type === "price_breakout") {
@@ -1666,6 +1753,23 @@ function shouldExitStrategy(type, previous, current, params) {
     return macdCrossDown || rsiRisk;
   }
 
+  if (type === "kdj_cross") {
+    const kdjCrossDown = isCrossDown(previous.k, current.k, previous.d, current.d);
+    const zoneReached =
+      !params.requireZoneFilter ||
+      ((Number.isFinite(current.k) && current.k >= Number(params.sellThreshold)) ||
+        (Number.isFinite(current.d) && current.d >= Number(params.sellThreshold)));
+    return kdjCrossDown && zoneReached;
+  }
+
+  if (type === "bollinger_reversion") {
+    const exitToMid = isCrossUp(previous.close, current.close, previous.bollMiddle, current.bollMiddle);
+    const exitToUpper = isCrossUp(previous.close, current.close, previous.bollUpper, current.bollUpper);
+    const retreatLower = isCrossDown(previous.close, current.close, previous.bollLower, current.bollLower);
+    const targetExit = params.exitMode === "upper" ? exitToUpper : exitToMid;
+    return targetExit || retreatLower;
+  }
+
   if (type === "price_breakout") {
     const breakdownTriggered =
       Number.isFinite(current.breakdown) &&
@@ -1691,6 +1795,14 @@ function buildStrategyEntryReason(type, previous, current, params) {
   }
   if (type === "macd_cross") {
     return params.useRsiFilter ? "MACD 金叉 + RSI 区间过滤通过" : "MACD 金叉";
+  }
+  if (type === "kdj_cross") {
+    return params.requireZoneFilter
+      ? `KDJ 金叉（低位区 <= ${params.buyThreshold}）`
+      : "KDJ 金叉";
+  }
+  if (type === "bollinger_reversion") {
+    return `回收布林下轨（${params.useTrendFilter ? "含 MA20 趋势过滤" : "无趋势过滤"}）`;
   }
   if (type === "price_breakout") {
     return `突破 ${formatNumber(current.breakout)} 上方，趋势转强`;
@@ -1724,6 +1836,20 @@ function buildStrategyExitReason(type, previous, current, params) {
       return "MACD 死叉";
     }
     return "RSI 触发风控离场";
+  }
+  if (type === "kdj_cross") {
+    return params.requireZoneFilter
+      ? `KDJ 死叉（高位区 >= ${params.sellThreshold}）`
+      : "KDJ 死叉";
+  }
+  if (type === "bollinger_reversion") {
+    if (isCrossDown(previous.close, current.close, previous.bollLower, current.bollLower)) {
+      return "再次跌破布林下轨离场";
+    }
+    if (params.exitMode === "upper") {
+      return "触达布林上轨离场";
+    }
+    return "回到布林中轨离场";
   }
   if (type === "price_breakout") {
     if (Number.isFinite(current.breakdown) && current.close < current.breakdown) {
@@ -1854,6 +1980,33 @@ function sanitizeStrategyParams(type, rawParams) {
     };
   }
 
+  if (type === "kdj_cross") {
+    const kdjPeriod = clampInteger(raw.kdjPeriod, 6, 30, defaults.kdjPeriod);
+    let buyThreshold = clampNumber(raw.buyThreshold, 5, 50, defaults.buyThreshold);
+    let sellThreshold = clampNumber(raw.sellThreshold, 50, 95, defaults.sellThreshold);
+    if (buyThreshold >= sellThreshold) {
+      buyThreshold = Math.max(5, sellThreshold - 10);
+    }
+    return {
+      kdjPeriod,
+      buyThreshold,
+      sellThreshold,
+      requireZoneFilter: Boolean(raw.requireZoneFilter ?? defaults.requireZoneFilter),
+    };
+  }
+
+  if (type === "bollinger_reversion") {
+    const bollPeriod = clampInteger(raw.bollPeriod, 10, 80, defaults.bollPeriod);
+    const bollStd = clampNumber(raw.bollStd, 1, 3.5, defaults.bollStd);
+    const exitMode = raw.exitMode === "upper" ? "upper" : "mid";
+    return {
+      bollPeriod,
+      bollStd,
+      exitMode,
+      useTrendFilter: Boolean(raw.useTrendFilter ?? defaults.useTrendFilter),
+    };
+  }
+
   if (type === "price_breakout") {
     const breakoutPeriod = clampInteger(raw.breakoutPeriod, 5, 120, defaults.breakoutPeriod);
     let breakdownPeriod = clampInteger(raw.breakdownPeriod, 3, 80, defaults.breakdownPeriod);
@@ -1949,6 +2102,16 @@ function describeStrategyConfig(configInput) {
   }
   if (config.type === "macd_cross") {
     return `MACD 金叉买入、死叉卖出${params.useRsiFilter ? `，RSI 区间 ${params.rsiFloor}-${params.rsiCeil}` : ""} · ${executionSummary}`;
+  }
+  if (config.type === "kdj_cross") {
+    return `KDJ(${params.kdjPeriod}) 金叉买入、死叉卖出${
+      params.requireZoneFilter ? `，低位<=${params.buyThreshold} 高位>=${params.sellThreshold}` : ""
+    } · ${executionSummary}`;
+  }
+  if (config.type === "bollinger_reversion") {
+    return `回踩布林下轨反弹买入，${params.exitMode === "upper" ? "触达上轨" : "回到中轨"}卖出${
+      params.useTrendFilter ? "（含 MA20 过滤）" : ""
+    } · ${executionSummary}`;
   }
   if (config.type === "price_breakout") {
     return `突破 ${params.breakoutPeriod} 周期高点买入，跌破 ${params.breakdownPeriod} 周期低点卖出${
@@ -2127,6 +2290,62 @@ function calculateRollingExtremeSeries(values, period, mode, lookbackOffset = 1)
     if (!Number.isFinite(extreme)) return null;
     return extreme;
   });
+}
+
+function calculateKdjSeries(bars, period = 9) {
+  if (!Array.isArray(bars) || !bars.length || !Number.isFinite(period) || period < 2) {
+    return [];
+  }
+
+  const normalizedPeriod = Math.max(2, Math.round(period));
+  const result = bars.map(() => ({ k: null, d: null, j: null }));
+  let k = 50;
+  let d = 50;
+
+  for (let index = 0; index < bars.length; index += 1) {
+    if (index + 1 < normalizedPeriod) continue;
+    const window = bars.slice(index + 1 - normalizedPeriod, index + 1);
+    const lows = window.map((item) => numberOrNull(item?.low)).filter((value) => Number.isFinite(value));
+    const highs = window.map((item) => numberOrNull(item?.high)).filter((value) => Number.isFinite(value));
+    const close = numberOrNull(bars[index]?.close);
+    if (!lows.length || !highs.length || !Number.isFinite(close)) continue;
+
+    const llv = Math.min(...lows);
+    const hhv = Math.max(...highs);
+    const denominator = hhv - llv;
+    const rsv = denominator <= 0 ? 50 : ((close - llv) / denominator) * 100;
+    k = (2 * k + rsv) / 3;
+    d = (2 * d + k) / 3;
+    const j = 3 * k - 2 * d;
+    result[index] = { k, d, j };
+  }
+
+  return result;
+}
+
+function calculateBollingerSeries(closes, period = 20, stdMultiplier = 2) {
+  if (!Array.isArray(closes) || !closes.length) {
+    return { middle: [], upper: [], lower: [] };
+  }
+  const normalizedPeriod = Math.max(2, Math.round(Number(period) || 20));
+  const normalizedMultiplier = Math.max(0.1, Number(stdMultiplier) || 2);
+  const middle = closes.map(() => null);
+  const upper = closes.map(() => null);
+  const lower = closes.map(() => null);
+
+  for (let index = normalizedPeriod - 1; index < closes.length; index += 1) {
+    const window = closes.slice(index + 1 - normalizedPeriod, index + 1);
+    const valid = window.map((value) => numberOrNull(value)).filter((value) => Number.isFinite(value));
+    if (valid.length !== normalizedPeriod) continue;
+    const mean = valid.reduce((sum, value) => sum + value, 0) / normalizedPeriod;
+    const variance = valid.reduce((sum, value) => sum + (value - mean) ** 2, 0) / normalizedPeriod;
+    const std = Math.sqrt(Math.max(variance, 0));
+    middle[index] = mean;
+    upper[index] = mean + normalizedMultiplier * std;
+    lower[index] = mean - normalizedMultiplier * std;
+  }
+
+  return { middle, upper, lower };
 }
 
 function resampleBarsByTimeframe(bars, timeframe) {

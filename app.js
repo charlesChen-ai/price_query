@@ -562,6 +562,16 @@ function bindEvents() {
     const action = button.getAttribute("data-action");
     if (!cardId || !action) return;
 
+    const card = state.cards.find((item) => item.id === cardId);
+    if (!card) return;
+
+    if (action === "collapse") {
+      card.collapsed = !card.collapsed;
+      saveCards();
+      renderCard(card);
+      return;
+    }
+
     if (action === "refresh") {
       await refreshCard(cardId, true);
       return;
@@ -689,6 +699,7 @@ function buildStockCard({
     quote: null,
     status: "等待刷新",
     lastUpdatedAt: 0,
+    collapsed: false,
     isRefreshing: false,
   };
 }
@@ -718,6 +729,7 @@ function buildCommodityCard({ symbol, title, refreshInterval, visualSize, permis
     quote: null,
     status: "等待刷新",
     lastUpdatedAt: 0,
+    collapsed: false,
     isRefreshing: false,
   };
 }
@@ -748,6 +760,7 @@ function buildHnCard({ title, refreshInterval, visualSize, permissions, hnLimit 
     news: [],
     status: "等待刷新",
     lastUpdatedAt: 0,
+    collapsed: false,
     isRefreshing: false,
   };
 }
@@ -764,6 +777,7 @@ function buildQuoteCard({ title, refreshInterval, visualSize, permissions, quote
     quoteItem: null,
     status: "等待刷新",
     lastUpdatedAt: 0,
+    collapsed: false,
     isRefreshing: false,
   };
 }
@@ -870,8 +884,6 @@ async function refreshCard(cardId, manual = false) {
   }
 
   card.isRefreshing = true;
-  card.status = "刷新中...";
-  renderCard(card, { statusOnly: true });
 
   try {
     if (card.type === "hn") {
@@ -1362,6 +1374,7 @@ function hydrateCards(cards) {
       ...card,
       type,
       refreshInterval: parseRefreshIntervalForType(card?.refreshInterval, type),
+      collapsed: Boolean(card?.collapsed),
       permissions: { ...defaultPermissions, ...(card.permissions || {}) },
       status: card.status || "等待刷新",
       lastUpdatedAt: card.lastUpdatedAt || 0,
@@ -2674,6 +2687,7 @@ function populateCardElement(node, card, options = {}) {
   const visualSizeClass =
     card.type === "stock" || card.type === "commodity" ? DEFAULT_CARD_VISUAL_SIZE : parseCardVisualSize(card.visualSize);
   node.classList.add(`card-size-${visualSizeClass}`);
+  node.classList.toggle("is-collapsed", Boolean(card.collapsed));
 
   symbolEl.textContent =
     card.type === "hn" ? "HN TOP" : card.type === "quote" ? "QUOTE" : card.type === "commodity" ? "CMDTY" : card.querySymbol;
@@ -2683,6 +2697,7 @@ function populateCardElement(node, card, options = {}) {
   if (statusOnly) return;
 
   actions.innerHTML = "";
+  actions.appendChild(actionButton("collapse", card.id, { collapsed: Boolean(card.collapsed) }));
   if (card.permissions.allowManualRefresh) {
     actions.appendChild(actionButton("refresh", card.id));
   }
@@ -2691,6 +2706,11 @@ function populateCardElement(node, card, options = {}) {
   }
   if (card.permissions.allowDelete) {
     actions.appendChild(actionButton("delete", card.id));
+  }
+
+  if (card.collapsed) {
+    renderCollapsedBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap);
+    return;
   }
 
   if (card.type === "hn") {
@@ -2702,6 +2722,52 @@ function populateCardElement(node, card, options = {}) {
   } else {
     renderStockBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap);
   }
+}
+
+function renderCollapsedBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap) {
+  chartWrap.hidden = true;
+  volumeWrap.hidden = true;
+  newsWrap.hidden = true;
+  quoteWrap.hidden = true;
+
+  if (card.type === "stock") {
+    metrics.innerHTML = buildCollapsedStockLine(card);
+    return;
+  }
+
+  if (card.type === "commodity") {
+    const quote = card.quote;
+    const changePercent = quote ? `${formatSigned(quote.changePercent)}%` : "--";
+    const text = quote
+      ? `现价 ${formatNumber(quote.price)} ${quote.currency || ""} · 涨跌幅 ${changePercent}`
+      : "暂无行情，点击刷新获取。";
+    metrics.innerHTML = `<p class="collapsed-summary">${escapeHtml(text.trim())}</p>`;
+    return;
+  }
+
+  if (card.type === "hn") {
+    const count = Array.isArray(card.news) ? card.news.length : 0;
+    metrics.innerHTML = `<p class="collapsed-summary">热门条数 ${count}</p>`;
+    return;
+  }
+
+  const item = normalizeQuoteItem(card.quoteItem);
+  const text = item?.text ? `片段：${item.text}` : "暂无思维片段，点击刷新获取。";
+  metrics.innerHTML = `<p class="collapsed-summary">${escapeHtml(text)}</p>`;
+}
+
+function buildCollapsedStockLine(card) {
+  const quote = card.quote;
+  if (!quote) {
+    return '<p class="collapsed-summary">暂无行情，点击刷新获取。</p>';
+  }
+  const priceDirection = buildLatestPriceDirectionArrow(card, quote);
+  const latest = `${formatNumber(quote.price)} ${quote.currency || ""}`.trim();
+  const changePercent = `${formatSigned(quote.changePercent)}%`;
+  return `<div class="collapsed-stock-line">
+    <span>现价 ${escapeHtml(`${latest} ${priceDirection}`.trim())}</span>
+    <span>涨跌幅 ${escapeHtml(changePercent)}</span>
+  </div>`;
 }
 
 function renderCommodityBody(card, metrics, chartWrap, volumeWrap, newsWrap, quoteWrap) {
@@ -2924,29 +2990,39 @@ function buildNewsList(stories, permissions) {
   return `<ul class="news-list">${items}</ul>`;
 }
 
-function actionButton(action, cardId) {
+function actionButton(action, cardId, options = {}) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "card-icon-btn";
+  if (action === "collapse") {
+    button.classList.add("is-collapse");
+  }
   if (action === "delete") {
     button.classList.add("is-danger");
   }
   button.dataset.action = action;
   button.dataset.cardId = cardId;
-  button.ariaLabel = getActionLabel(action);
-  button.title = getActionLabel(action);
-  button.innerHTML = getActionIcon(action);
+  button.ariaLabel = getActionLabel(action, options);
+  button.title = getActionLabel(action, options);
+  button.innerHTML = getActionIcon(action, options);
   return button;
 }
 
-function getActionLabel(action) {
+function getActionLabel(action, options = {}) {
+  if (action === "collapse") return options.collapsed ? "展开卡片" : "折叠卡片";
   if (action === "refresh") return "刷新";
   if (action === "edit") return "权限设置";
   if (action === "delete") return "删除";
   return action;
 }
 
-function getActionIcon(action) {
+function getActionIcon(action, options = {}) {
+  if (action === "collapse") {
+    if (options.collapsed) {
+      return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v10M7 12h10"/></svg>`;
+    }
+    return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 12h10"/></svg>`;
+  }
   if (action === "refresh") {
     return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>`;
   }

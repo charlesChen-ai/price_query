@@ -111,7 +111,7 @@ strong,
 
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr));
   gap: 16px;
   align-items: start;
 }
@@ -205,9 +205,27 @@ strong,
 
 .card-type-stock .stock-meta-metrics {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 14px;
-  row-gap: 4px;
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: 0;
+  row-gap: 3px;
+}
+
+.card-type-stock .stock-meta-metrics .stock-metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.card-type-stock .stock-meta-metrics .stock-metric .label {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.card-type-stock .stock-meta-metrics .stock-metric .value {
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .card-type-stock .technical-panel {
@@ -508,6 +526,36 @@ strong,
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.stock-card.is-collapsed {
+  gap: 8px;
+}
+
+.collapsed-stock-line {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  font-size: 0.76rem;
+  color: var(--ink);
+  line-height: 1.25;
+}
+
+.collapsed-stock-line span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.collapsed-summary {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--muted);
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .metric {
